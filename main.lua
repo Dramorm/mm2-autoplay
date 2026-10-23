@@ -1,4 +1,4 @@
--- MM2 Autoplay Script v0.7.4
+-- MM2 Autoplay Script v0.7.8
 -- Walking autoplay bot: pathfinding, evasion, role play styles, bag-full actions, configurable UI.
 
 if game.PlaceId ~= 142823291 then
@@ -30,64 +30,127 @@ player = Players.LocalPlayer
 end
 
 -- "Play" menu that shows up when a friend is in the server (it blocks spawning until it is clicked).
--- Runs on its own thread right away so nothing else has to wait for it.
+-- Runs on its own thread right away so nothing else has to wait for it. Several ways of pressing the button are
+-- tried one after another, and only a menu that really closed counts as success.
 local function setupJoinMenu()
 local starterGui = game:GetService("StarterGui")
+local guiService = game:GetService("GuiService")
 local playerGui = player:WaitForChild("PlayerGui")
 local execName = (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname()) or "your executor"
 
-local function handleButton(button)
-    if button and button.Visible then
-        if typeof(getconnections) == "function" then
-            for _, connection in ipairs(getconnections(button.MouseButton1Click)) do
-                local fn = connection.Function
-                if fn then
-                    task.spawn(fn)
-                else
-                    pcall(function() connection:Fire() end)
+local function notify(title, text, duration)
+    pcall(function()
+        starterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = duration or 6})
+    end)
+end
+
+-- visible only if the button and everything above it is visible and still inside PlayerGui
+local function isShown(obj)
+    local cur = obj
+    while cur and cur ~= playerGui do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("LayerCollector") and not cur.Enabled then return false end
+        cur = cur.Parent
+    end
+    return cur == playerGui
+end
+
+local function findPlay()
+    local join = playerGui:FindFirstChild("Join")
+    local friends = join and join:FindFirstChild("Friends")
+    local play = friends and friends:FindFirstChild("Play")
+    if play and play:IsA("GuiButton") then return play end
+    return nil
+end
+
+local methods = {
+    {name = "getconnections", run = function(btn)
+        if typeof(getconnections) ~= "function" then return false end
+        local fired = 0
+        for _, signal in ipairs({btn.MouseButton1Click, btn.Activated}) do
+            local ok, conns = pcall(getconnections, signal)
+            if ok and type(conns) == "table" then
+                for _, c in ipairs(conns) do
+                    local fn = c.Function
+                    if fn then
+                        task.spawn(fn)
+                        fired = fired + 1
+                    elseif pcall(function() c:Fire() end) then
+                        fired = fired + 1
+                    end
                 end
             end
+        end
+        return fired > 0
+    end},
+    {name = "firesignal", run = function(btn)
+        if typeof(firesignal) ~= "function" then return false end
+        pcall(firesignal, btn.MouseButton1Click)
+        pcall(firesignal, btn.Activated)
+        return true
+    end},
+    {name = "gui selection", run = function(btn)
+        local vim = game:GetService("VirtualInputManager")
+        guiService.SelectedObject = btn
+        task.wait(0.15)
+        vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        task.wait(0.05)
+        vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        return true
+    end},
+    {name = "virtual click", run = function(btn)
+        local vim = game:GetService("VirtualInputManager")
+        local inset = guiService:GetGuiInset()
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
+        vim:SendMouseButtonEvent(pos.X, pos.Y + inset.Y, 0, true, game, 0)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(pos.X, pos.Y + inset.Y, 0, false, game, 0)
+        return true
+    end},
+}
 
-            pcall(function()
-                starterGui:SetCore("SendNotification", {
-                    Title = "nice executor",
-                    Text = "your executor, " .. execName .. ", supports getconnections",
-                    Duration = 5
-                })
-            end)
-        else
+-- returns the name of the method that closed the menu, or nil
+local function tryClose(btn)
+    for _, m in ipairs(methods) do
+        local ok, used = pcall(m.run, btn)
+        if ok and used then
+            local started = os.clock()
+            while os.clock() - started < 2 do
+                if not isShown(btn) then return m.name end
+                task.wait(0.1)
+            end
+        end
+    end
+    return nil
+end
+
+-- poll instead of waiting for the button to be added: the menu may already exist but not be visible yet
+local started = os.clock()
+local attempts = 0
+while os.clock() - started < 120 do
+    local btn = findPlay()
+    if btn and isShown(btn) then
+        attempts = attempts + 1
+        local how = tryClose(btn)
+        if how == "getconnections" then
+            notify("nice executor", "your executor, " .. execName .. ", supports getconnections")
+            return
+        elseif how then
+            notify("join menu closed", execName .. " closed it using " .. how)
+            return
+        end
+
+        if attempts >= 3 then
+            -- nothing worked: at least get the menu off the screen
             local join = playerGui:FindFirstChild("Join")
             if join then join.Enabled = false end
             local loading = playerGui:FindFirstChild("Loading")
             if loading then loading.Enabled = false end
-
-            pcall(function()
-                starterGui:SetCore("SendNotification", {
-                    Title = "bad executor",
-                    Text = "your executor, " .. execName .. ", does not support getconnections. get a better executor buddy",
-                    Duration = 30
-                })
-            end)
+            notify("bad executor", "none of the click methods worked on " .. execName .. ". get a better executor buddy", 30)
+            return
         end
     end
-end
-
-local join = playerGui:FindFirstChild("Join")
-local playButton = join and join:FindFirstChild("Friends") and join.Friends:FindFirstChild("Play")
-
-if playButton and playButton.Visible then
-    handleButton(playButton)
-else
-    local connection
-    connection = playerGui.DescendantAdded:Connect(function(descendant)
-        if descendant.Name == "Play" and descendant:IsA("TextButton") then
-            task.spawn(function()
-                repeat task.wait() until descendant.Visible
-                handleButton(descendant)
-                connection:Disconnect()
-            end)
-        end
-    end)
+    task.wait(0.5)
 end
 end
 task.spawn(setupJoinMenu)
@@ -101,7 +164,7 @@ end
 -- give the game's own scripts a moment to build their GUI and remotes
 task.wait(1.5)
 
-local VERSION = "v0.7.4"
+local VERSION = "v0.7.8"
 local enabled = true
 local running = true
 local alive = false
@@ -219,7 +282,9 @@ engageRange = {15, 35},
 sheriffRange = {30, 150},
 aimDelay = {0, 1},
 hopFewerThan = {2, 12},
-hopMoreThan = {2, 11},
+hopMoreThan = {2, 12},
+agentRadius = {1, 3},
+waypointReach = {1, 4},
 hopPingLimit = {100, 600},
 uiScale = {0.6, 1.6},
 nearbyRadius = {5, 40},
@@ -228,8 +293,9 @@ stabRange = {6, 15},
 sheriffKeepDist = {10, 40},
 giveUpTime = {4, 60},
 pathCandidates = {1, 5},
-hopTargetMin = {2, 12},
-hopTargetMax = {2, 12},
+cheaterSpeed = {30, 200},
+huntSightRange = {30, 300},
+reportRounds = {1, 3},
 huntMemory = {0, 10},
 }
 
@@ -248,7 +314,19 @@ settleTime = 4,
 uiConns = {},
 gamemode = "Classic",
 cheaters = {},
+cheaterInfo = {},
+wiggleUntil = 0,
+wiggleDir = Vector3.new(0, 0, 0),
 unloaded = false,
+boostUntil = 0,
+lastRootPos = nil,
+wpRoute = nil,
+wpIndex = 0,
+wpBest = 0,
+wpT = 0,
+stuckCount = setmetatable({}, {__mode = "k"}),
+reportsSent = 0,
+lastReportT = 0,
 coinContainer = nil,
 coinContainerCheck = 0,
 coinList = {},
@@ -294,12 +372,12 @@ debugRays = false,
 autoJump = true,
 autoHopPing = false,
 hopIfFewer = false,
-hopFewerThan = 5,
+hopFewerThan = 2,
 hopIfMore = false,
-hopMoreThan = 10,
+hopMoreThan = 5,
 hopIfAlone = false,
 hopPingLimit = 200,
-hopMethod = "MM2",
+hopMethod = "Public servers",
 innocentMode = "Just coins",
 innocentBagFull = "Stand",
 innocentStandRun = true,
@@ -320,10 +398,17 @@ huntPriority = "Sheriff first",
 planAhead = true,
 giveUpTime = 10,
 pathCandidates = 3,
-hopTargetMin = 2,
-hopTargetMax = 5,
 antiFling = true,
 cheaterDetect = true,
+cheaterSpeed = 60,
+huntSightRange = 150,
+standFromSeats = true,
+smoothPaths = true,
+agentRadius = 1.6,
+waypointReach = 2.0,
+settingsVersion = 2,
+autoReport = false,
+reportRounds = 2,
 huntMemory = 4,
 grabNearby = true,
 nearbyRadius = 14,
@@ -383,6 +468,11 @@ if DEFAULT_SETTINGS[k] ~= nil then
 botSettings[k] = v
 end
 end
+-- saved by an older version: switch to the new default hop method once
+if (tonumber(data.settingsVersion) or 1) < 2 then
+botSettings.hopMethod = DEFAULT_SETTINGS.hopMethod
+end
+botSettings.settingsVersion = DEFAULT_SETTINGS.settingsVersion
 end
 end
 sanitizeSettings()
@@ -1283,6 +1373,7 @@ addToggle(behaviorCard, "Bot enabled", "botEnabled", function(v) setBotEnabled(v
 addToggle(behaviorCard, "Auto vote map", "autoVoteMap")
 addToggle(behaviorCard, "Auto jump", "autoJump")
 addToggle(behaviorCard, "Anti-fling (no player collisions)", "antiFling")
+addToggle(behaviorCard, "Stand up from seats", "standFromSeats")
 
 local logCard = section(controlPage, "Event log")
 local logHolder = makeRow(logCard, 150)
@@ -1353,6 +1444,7 @@ shStand.row.Visible = (botSettings.sheriffBagFull == "Stand")
 local muCard = section(rolesPage, "Murderer")
 addDropdown(muCard, "Play style", "murdererMode", CHOICES.murdererMode)
 addDropdown(muCard, "Target priority", "huntPriority", CHOICES.huntPriority)
+addSlider(muCard, "Hunt sight range", "huntSightRange", 10, "%.0f studs")
 addToggle(muCard, "Throw knife", "throwKnife")
 addSlider(muCard, "Engage range", "engageRange", 1, "%.0f studs")
 addSlider(muCard, "Stab range", "stabRange", 1, "%.0f studs")
@@ -1390,6 +1482,9 @@ addSlider(awareCard, "Evade distance", "evadeDistance", 1, "%.0f studs")
 addSlider(awareCard, "Chase memory after losing sight", "huntMemory", 1, "%.0f s")
 local moveCard = section(tuningPage, "Movement")
 addSlider(moveCard, "Wander radius", "wanderRadius", 5, "%.0f studs")
+addToggle(moveCard, "Smooth paths (cut corners safely)", "smoothPaths")
+addSlider(moveCard, "Agent radius (clearance)", "agentRadius", 0.1, "%.1f studs")
+addSlider(moveCard, "Waypoint reach", "waypointReach", 0.1, "%.1f studs")
 addSlider(moveCard, "Give up if not getting closer", "giveUpTime", 1, "%.0f s")
 
 -- Visuals
@@ -1401,16 +1496,17 @@ addToggle(visCard, "Path ESP", "pathEsp", function(v)
     if not v then clearRoute() end
 end)
 addToggle(visCard, "Cheater detector (purple)", "cheaterDetect")
+addSlider(visCard, "Cheater speed threshold", "cheaterSpeed", 5, "%.0f studs/s")
+addToggle(visCard, "Auto-report flagged cheaters", "autoReport")
+addSlider(visCard, "Report after flagged in N rounds", "reportRounds", 1, "%.0f")
 addToggle(visCard, "Debug rays", "debugRays", function(v)
     if not v then debugFolder:ClearAllChildren() end
 end)
-addButton(visCard, "Clear cheater marks", function() S.cheaters = {} end, false)
+addButton(visCard, "Clear cheater marks", function() S.cheaters = {}; S.cheaterInfo = {} end, false)
 
 -- Server
 local hopCard = section(serverPage, "Server hop")
 addDropdown(hopCard, "Hop method", "hopMethod", CHOICES.hopMethod)
-addNumberInput(hopCard, "Join servers with at least (players)", "hopTargetMin")
-addNumberInput(hopCard, "Join servers with at most (players)", "hopTargetMax")
 addToggleInput(hopCard, "Hop if fewer than (players)", "hopIfFewer", "hopFewerThan")
 addToggleInput(hopCard, "Hop if more than (players)", "hopIfMore", "hopMoreThan")
 addToggle(hopCard, "Hop if alone", "hopIfAlone")
@@ -1693,17 +1789,20 @@ task.spawn(function()
         else
             failures = 0
 
-            -- only servers inside the wanted size range. The minimum is never below 2 because everybody
-            -- likes to join empty 1-player servers, so those fill up or end up with nobody to play with.
-            local minWanted = math.max(2, botSettings.hopTargetMin)
-            local maxWanted = math.max(minWanted, botSettings.hopTargetMax)
+            -- Same rules as the "hop if fewer / more than" settings decide which server we pick. After joining
+            -- there will be playing + 1 players. Never lower than 2 players: everybody loves joining empty
+            -- 1-player servers, so those fill up or leave us with nobody to play with.
+            local minWanted = 2
+            local maxWanted = 12
+            if botSettings.hopIfFewer then minWanted = math.max(2, botSettings.hopFewerThan) end
+            if botSettings.hopIfMore then maxWanted = math.max(minWanted, botSettings.hopMoreThan) end
 
             local candidates = {}
             for _, srv in ipairs(data.data) do
                 local id = tostring(srv.id)
                 local playing = tonumber(srv.playing) or 0
                 local maxPlayers = tonumber(srv.maxPlayers) or 0
-                if not seen[id] and playing >= minWanted and playing <= maxWanted and playing < maxPlayers then
+                if not seen[id] and playing + 1 >= minWanted and playing + 1 <= maxWanted and playing < maxPlayers then
                     table.insert(candidates, srv)
                 end
             end
@@ -2478,6 +2577,13 @@ if activeRound and not lastRoundState then
     S.roundStartClock = os.clock()
     S.roundActionDone = false
     S.aimStart = nil
+    clearRoute()
+    chaseRoute = nil
+    wanderRoute = nil
+    wanderRouteIndex = 1
+    isWandering = false
+    noPathTimer = 0
+    S.hintCoin = nil
 end
 
 if lastRoundState and not activeRound then
@@ -2649,11 +2755,15 @@ local highOrigin = Vector3.new(root.Position.X, feetY + 5.2, root.Position.Z)
 
 local lowHit = workspace:Raycast(lowOrigin, direction, rayParams)
 local highHit = workspace:Raycast(highOrigin, direction, rayParams)
+local midOrigin = Vector3.new(root.Position.X, feetY + 2.6, root.Position.Z)
+local midHit = workspace:Raycast(midOrigin, direction, rayParams)
 
 drawDebugRay(lowOrigin, direction, lowHit ~= nil, Color3.fromRGB(60, 255, 60))
 drawDebugRay(highOrigin, direction, highHit ~= nil, Color3.fromRGB(60, 150, 255))
 
-if lowHit and lowHit.Instance and lowHit.Instance.CanCollide then
+local obstacle = (lowHit and lowHit.Instance and lowHit.Instance.CanCollide)
+    or (midHit and midHit.Instance and midHit.Instance.CanCollide)
+if obstacle then
     if not highHit or (highHit.Instance and not highHit.Instance.CanCollide) then
         return true
     end
@@ -2690,6 +2800,10 @@ lastStuckPos = root.Position
                     hum:ChangeState(Enum.HumanoidStateType.Jumping)
                     hum.Jump = true
                     lastJumpTime = os.clock()
+                    if os.clock() > S.wiggleUntil then
+                        S.wiggleUntil = os.clock() + 0.5
+                        S.wiggleDir = root.CFrame.RightVector * (math.random() < 0.5 and 1 or -1)
+                    end
                 end
                 if stuckTimer > 1.5 then
                     if targetCoin and not isTargetingGun then
@@ -2699,6 +2813,7 @@ lastStuckPos = root.Position
                     chaseRoute = nil
                     wanderRoute = nil
                     stuckTimer = 0
+                    S.boostUntil = os.clock() + 6
                     if not noRebuild then buildRouteAsync() end
                 end
             else
@@ -2731,6 +2846,137 @@ return true
 end
 end
 return false
+end
+
+-- ===== route building: straight-line shortcut, Roblox pathfinding, corner smoothing =====
+local agentParams
+local computeRoute
+do
+    local walkParams = RaycastParams.new()
+    walkParams.FilterType = Enum.RaycastFilterType.Exclude
+    walkParams.RespectCanCollide = true
+
+    local function refreshIgnore()
+        local ignore = {visFolder, debugFolder}
+        if player.Character then table.insert(ignore, player.Character) end
+        walkParams.FilterDescendantsInstances = ignore
+    end
+
+    local function newWp(pos)
+        return {Position = pos, Action = Enum.PathWaypointAction.Walk}
+    end
+
+    -- the ground point under a position
+    local function feetPos(pos)
+        refreshIgnore()
+        local hit = workspace:Raycast(pos + Vector3.new(0, 1, 0), Vector3.new(0, -12, 0), walkParams)
+        if hit then return hit.Position end
+        return pos - Vector3.new(0, 3, 0)
+    end
+
+    -- true when we can just walk a straight line between two ground points: nothing solid at body or knee
+    -- height (swept with our own width) and an even floor all along it
+    local function canWalkDirect(a, b)
+        local delta = b - a
+        local flatLen = Vector3.new(delta.X, 0, delta.Z).Magnitude
+        if flatLen < 0.5 then return true end
+        if flatLen > 90 or math.abs(delta.Y) > 2.5 then return false end
+
+        refreshIgnore()
+        if workspace:Spherecast(a + Vector3.new(0, 2.6, 0), 1.4, delta, walkParams) then return false end
+        if workspace:Spherecast(a + Vector3.new(0, 1.0, 0), 0.8, delta, walkParams) then return false end
+
+        local steps = math.ceil(flatLen / 3)
+        local prevY = a.Y
+        for i = 1, steps do
+            local p = a:Lerp(b, i / steps)
+            local hit = workspace:Raycast(p + Vector3.new(0, 3, 0), Vector3.new(0, -7, 0), walkParams)
+            if not hit or hit.Normal.Y < 0.75 then return false end
+            if math.abs(hit.Position.Y - p.Y) > 1.2 or math.abs(hit.Position.Y - prevY) > 1.0 then return false end
+            prevY = hit.Position.Y
+        end
+        return true
+    end
+
+    local function safeDirect(a, b)
+        local ok, res = pcall(canWalkDirect, a, b)
+        return ok and res == true
+    end
+
+    -- Drops waypoints we do not need: from each waypoint, jump as far ahead as a straight walk is still clear.
+    -- Jump / special waypoints are never skipped.
+    local function smoothWaypoints(wps)
+        if #wps <= 2 then return wps end
+        local feet = {}
+        local function feetOf(i)
+            if not feet[i] then feet[i] = feetPos(wps[i].Position) end
+            return feet[i]
+        end
+
+        local out = {wps[1]}
+        local i = 1
+        local work = 0
+        while i < #wps do
+            local limit = math.min(#wps, i + 6)
+            for k = i + 1, limit do
+                if wps[k].Action ~= Enum.PathWaypointAction.Walk then
+                    limit = k
+                    break
+                end
+            end
+
+            local nextIdx = i + 1
+            for j = limit, i + 2, -1 do
+                if safeDirect(feetOf(i), feetOf(j)) then
+                    nextIdx = j
+                    break
+                end
+            end
+            table.insert(out, wps[nextIdx])
+            i = nextIdx
+
+            work = work + 1
+            if work % 4 == 0 then task.wait() end
+        end
+        return out
+    end
+
+    agentParams = function()
+        local radius = botSettings.agentRadius
+        if os.clock() < S.boostUntil then radius = radius + 0.3 end -- a bit more clearance after getting stuck
+        return {
+            AgentRadius = radius,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            AgentCanClimb = true,
+            WaypointSpacing = 3
+        }
+    end
+
+    -- returns waypoints and a status ("direct" or an Enum.PathStatus), or nil when there is no route
+    computeRoute = function(startPos, goalPos)
+        local sFeet = feetPos(startPos)
+        local gFeet = feetPos(goalPos)
+        if safeDirect(sFeet, gFeet) then
+            return {newWp(sFeet), newWp(gFeet)}, "direct"
+        end
+
+        local path = PathfindingService:CreatePath(agentParams())
+        local ok = pcall(function() path:ComputeAsync(startPos, goalPos) end)
+        if not ok then return nil, nil end
+
+        local status = path.Status
+        if status == Enum.PathStatus.Success or status == Enum.PathStatus.ClosestNoPath then
+            local wps = path:GetWaypoints()
+            if #wps > 0 then
+                if status == Enum.PathStatus.Success and botSettings.smoothPaths then
+                    wps = smoothWaypoints(wps)
+                end
+                return wps, status
+            end
+        end
+        return nil, status
+    end
 end
 
 local function pathLength(waypoints)
@@ -2802,20 +3048,10 @@ for i = 1, limit do
     if cPos then
         pendingJobs = pendingJobs + 1
         task.spawn(function()
-            local path = PathfindingService:CreatePath({
-                AgentRadius = 1.4,
-                AgentHeight = 5,
-                AgentCanJump = true,
-                AgentCanClimb = true,
-                WaypointSpacing = 3
-            })
             local goal = groundBelow(cPos)
-            local ok = pcall(function() path:ComputeAsync(startPos, goal) end)
-            if ok and path.Status == Enum.PathStatus.Success then
-                local wps = path:GetWaypoints()
-                if #wps > 0 then
-                    results[i] = {coin = coin, wps = wps, len = pathLength(wps), pos = cPos}
-                end
+            local wps, status = computeRoute(startPos, goal)
+            if wps and (status == "direct" or status == Enum.PathStatus.Success) then
+                results[i] = {coin = coin, wps = wps, len = pathLength(wps), pos = cPos}
             end
             pendingJobs = pendingJobs - 1
         end)
@@ -2962,21 +3198,9 @@ task.spawn(function()
     end
 
     local success = true
-    local pathStatus = Enum.PathStatus.Success
     if not waypoints then
-        local path = PathfindingService:CreatePath({
-            AgentRadius = 1.4,
-            AgentHeight = 5,
-            AgentCanJump = true,
-            AgentCanClimb = true,
-            WaypointSpacing = 3
-        })
         local goalPos = groundBelow(chosenPos)
-        success = pcall(function() path:ComputeAsync(startPos, goalPos) end)
-        pathStatus = path.Status
-        if success and (pathStatus == Enum.PathStatus.Success or pathStatus == Enum.PathStatus.ClosestNoPath) then
-            waypoints = path:GetWaypoints()
-        end
+        waypoints = computeRoute(startPos, goalPos)
     end
 
     -- things may have changed while the paths were computing
@@ -3201,13 +3425,7 @@ task.spawn(function()
     local rz = (math.random() - 0.5) * 2 * botSettings.wanderRadius
     local targetWanderPos = root.Position + Vector3.new(rx, 0, rz)
 
-    local path = PathfindingService:CreatePath({
-        AgentRadius = 1.4,
-        AgentHeight = 5,
-        AgentCanJump = true,
-        AgentCanClimb = true,
-        WaypointSpacing = 3
-    })
+    local path = PathfindingService:CreatePath(agentParams())
 
     local success, _ = pcall(function() path:ComputeAsync(root.Position, targetWanderPos) end)
 
@@ -3225,6 +3443,15 @@ end)
 end
 
 local function handleWanderingSearch(hum, root)
+if not isRoundActive() then
+    if isWandering or wanderRoute or noPathTimer > 0 then
+        isWandering = false
+        wanderRoute = nil
+        wanderRouteIndex = 1
+        noPathTimer = 0
+    end
+    return false
+end
 if noPathTimer >= 10 then
 if not isWandering then
 isWandering = true
@@ -3261,7 +3488,7 @@ return false
 
 end
 
--- Anti-fling and cheater detector
+-- Anti-fling, seat stand-up and cheater detector
 do
 local PURPLE = Color3.fromRGB(170, 90, 255)
 
@@ -3294,8 +3521,28 @@ local antiFlingConn = RunService.Stepped:Connect(function()
 end)
 table.insert(S.uiConns, antiFlingConn)
 
+-- Walking into a chair makes the character sit down, and the bot would just stay there. Jump back out.
+local lastStand = 0
+local standConn = RunService.Heartbeat:Connect(function()
+    if not botSettings.botEnabled or not botSettings.standFromSeats then return end
+    local ch = player.Character
+    local h = ch and ch:FindFirstChildOfClass("Humanoid")
+    if h and h.Sit and os.clock() - lastStand > 0.4 then
+        lastStand = os.clock()
+        h.Sit = false
+        h.Jump = true
+        h:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end)
+table.insert(S.uiConns, standConn)
+
 -- Cheater detector: watches how other players move. It only marks them (purple ESP + a log line);
--- the bot's own decisions never use it.
+-- the bot's own decisions never use it, except that the murderer does not hunt marked players.
+--
+-- S.cheaterInfo keeps the history (how many rounds someone was flagged). S.cheaters is the set that is shown as
+-- purple right now: anyone flagged this round, plus anyone flagged in 2+ rounds. A one-off flag disappears when
+-- the next round starts, and the count drops by one for every round a player is NOT flagged, so rare false
+-- flags cannot pile up over hours.
 local records = setmetatable({}, {__mode = "k"})
 
 local rayParams = RaycastParams.new()
@@ -3306,10 +3553,63 @@ local overlapParams = OverlapParams.new()
 overlapParams.FilterType = Enum.RaycastFilterType.Exclude
 overlapParams.RespectCanCollide = true
 
+-- Auto report (off by default). Guardrails: only after the player was flagged in several different rounds,
+-- never friends, once per player, at most 10 per session and 20 seconds apart.
+local function maybeReport(p, info)
+    if not botSettings.autoReport or info.reported then return end
+    if info.rounds < botSettings.reportRounds then return end
+    if S.reportsSent >= 10 or os.clock() - S.lastReportT < 20 then return end
+
+    local isFriend = false
+    pcall(function() isFriend = player:IsFriendsWith(p.UserId) end)
+    if isFriend then return end
+
+    info.reported = true
+    S.lastReportT = os.clock()
+    local ok, err = pcall(function()
+        Players:ReportAbuse(p, "Cheating/Exploiting", "Observed " .. info.reason .. " in " .. info.rounds .. " rounds")
+    end)
+    if ok then
+        S.reportsSent = S.reportsSent + 1
+        addLog("Reported " .. p.Name .. " for cheating", PURPLE)
+    else
+        addLog("Report failed: " .. string.sub(tostring(err), 1, 70), THEME.warn)
+    end
+end
+
 local function flag(p, reason)
-    if S.cheaters[p.UserId] then return end
-    S.cheaters[p.UserId] = reason
-    addLog("Possible cheater: " .. p.Name .. " (" .. reason .. ")", PURPLE)
+    local info = S.cheaterInfo[p.UserId]
+    if info and info.round == S.roundStartClock then return end -- already flagged this round
+
+    if info then
+        info.rounds = info.rounds + 1
+        info.round = S.roundStartClock
+        info.reason = reason
+        addLog(p.Name .. " flagged again (" .. reason .. "), round " .. info.rounds, PURPLE)
+    else
+        info = {reason = reason, rounds = 1, round = S.roundStartClock}
+        S.cheaterInfo[p.UserId] = info
+        addLog("Possible cheater: " .. p.Name .. " (" .. reason .. ")", PURPLE)
+    end
+    S.cheaters[p.UserId] = info
+    maybeReport(p, info)
+end
+
+-- a new round started: age the history
+local function onNewRound(prevRound)
+    for uid, info in pairs(S.cheaterInfo) do
+        if info.round ~= prevRound then
+            info.rounds = info.rounds - 1
+        end
+        if info.rounds <= 0 then
+            S.cheaterInfo[uid] = nil
+            S.cheaters[uid] = nil
+        elseif info.rounds >= 2 then
+            S.cheaters[uid] = info
+        else
+            S.cheaters[uid] = nil
+        end
+    end
 end
 
 local function analyse(p, now)
@@ -3323,7 +3623,7 @@ local function analyse(p, now)
 
     local rec = records[p]
     if not rec or rec.char ~= char then
-        records[p] = {char = char, pos = root.Position, t = now, born = now, fast = 0, air = 0, inside = 0, tele = 0, teleT = 0}
+        records[p] = {char = char, born = now, t = now, pos = root.Position, hist = {}, fastN = 0, air = 0, inside = 0}
         return
     end
 
@@ -3333,11 +3633,22 @@ local function analyse(p, now)
     rec.pos = root.Position
     rec.t = now
 
-    -- just spawned or moved in by the game: ignore
-    if now - rec.born < 4 then return end
-
+    -- a huge jump in one sample is the game moving them (map teleport): start over and wait a while
     local horizontal = Vector3.new(delta.X, 0, delta.Z).Magnitude
-    local speed = horizontal / dt
+    if horizontal > 60 then
+        rec.hist = {}
+        rec.fastN = 0
+        rec.air = 0
+        rec.inside = 0
+        rec.born = now
+        return
+    end
+    if now - rec.born < 8 then return end
+
+    -- only parts that really collide with this player's collision group count as solid
+    rayParams.CollisionGroup = root.CollisionGroup
+    overlapParams.CollisionGroup = root.CollisionGroup
+
     local vy = delta.Y / dt
     local spinning = root.AssemblyAngularVelocity.Magnitude > 15 -- tumbling = being flung, not flying
 
@@ -3347,41 +3658,41 @@ local function analyse(p, now)
         or state == Enum.HumanoidStateType.Swimming
         or state == Enum.HumanoidStateType.Seated
 
-    -- teleporting: huge jumps between samples, more than once
-    if horizontal > 60 then
-        if now - rec.teleT < 20 then rec.tele = rec.tele + 1 else rec.tele = 1 end
-        rec.teleT = now
-        if rec.tele >= 2 then
-            flag(p, "teleporting")
+    -- Speed: net distance over the last second, so a lag spike (stand still, then catch up) averages out.
+    -- It has to stay above the threshold for about 1.6 seconds. Small speed boosts stay below it.
+    table.insert(rec.hist, {t = now, pos = root.Position})
+    while #rec.hist > 1 and now - rec.hist[1].t > 1.2 do
+        table.remove(rec.hist, 1)
+    end
+    if #rec.hist >= 4 then
+        local first = rec.hist[1]
+        local span = now - first.t
+        local moved = Vector3.new(root.Position.X - first.pos.X, 0, root.Position.Z - first.pos.Z).Magnitude
+        if span > 0.5 and moved / span > botSettings.cheaterSpeed and not spinning then
+            rec.fastN = rec.fastN + 1
+        else
+            rec.fastN = 0
         end
-        return
+        if rec.fastN >= 8 then
+            flag(p, "speed hack / tween")
+            return
+        end
     end
 
-    -- far faster than anyone can run, for a sustained time (speed hack or tweening to coins)
-    if speed > 45 and not spinning then
-        rec.fast = rec.fast + dt
-    else
-        rec.fast = math.max(0, rec.fast - dt)
-    end
-    if rec.fast > 1.0 then
-        flag(p, "speed hack / tween")
-        return
-    end
-
-    -- flying: well above the ground and not falling, for much longer than any jump lasts
+    -- Flying: well above the ground and not falling, for much longer than any jump lasts
     local ground = workspace:Raycast(root.Position, Vector3.new(0, -60, 0), rayParams)
     local groundDist = ground and (root.Position.Y - ground.Position.Y) or math.huge
-    if groundDist > 9 and vy > -15 and not exempt and not spinning then
+    if groundDist > 10 and vy > -15 and not exempt and not spinning then
         rec.air = rec.air + dt
     else
         rec.air = 0
     end
-    if rec.air > 2.0 then
+    if rec.air > 3.0 then
         flag(p, "flying")
         return
     end
 
-    -- noclip: the middle of their body sits inside solid geometry
+    -- Noclip: the middle of their body sits inside solid geometry
     local inside = false
     if not exempt then
         for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, 0.6, overlapParams)) do
@@ -3396,15 +3707,22 @@ local function analyse(p, now)
     else
         rec.inside = math.max(0, rec.inside - dt)
     end
-    if rec.inside > 1.0 then
+    if rec.inside > 1.5 then
         flag(p, "noclip")
     end
 end
 
 task.spawn(function()
+    local lastRoundId = S.roundStartClock
     while not S.unloaded do
         task.wait(0.2)
-        if botSettings.cheaterDetect and isRoundActive() and os.clock() - S.roundStartClock > 6 then
+
+        if S.roundStartClock ~= lastRoundId then
+            onNewRound(lastRoundId)
+            lastRoundId = S.roundStartClock
+        end
+
+        if botSettings.cheaterDetect and isRoundActive() and os.clock() - S.roundStartClock > 10 then
             local ignore = {visFolder, debugFolder}
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr.Character then table.insert(ignore, plr.Character) end
@@ -3414,7 +3732,8 @@ task.spawn(function()
 
             local now = os.clock()
             for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= player and not S.cheaters[p.UserId] then
+                local info = S.cheaterInfo[p.UserId]
+                if p ~= player and not (info and info.round == S.roundStartClock) then
                     pcall(analyse, p, now)
                 end
             end
@@ -3423,6 +3742,19 @@ task.spawn(function()
         end
     end
 end)
+end
+
+local function waypointJump(hum, root, wp, flatDist)
+-- Jumps come from the path itself: Roblox marks the waypoints where a jump is needed (tables, boxes, ledges).
+if not botSettings.autoJump then return end
+if os.clock() - lastJumpTime < 0.6 then return end
+if typeof(wp) == "Vector3" or wp.Action ~= Enum.PathWaypointAction.Jump then return end
+if flatDist > 5 then return end
+local st = hum:GetState()
+if st == Enum.HumanoidStateType.Jumping or st == Enum.HumanoidStateType.Freefall or st == Enum.HumanoidStateType.Climbing then return end
+hum:ChangeState(Enum.HumanoidStateType.Jumping)
+hum.Jump = true
+lastJumpTime = os.clock()
 end
 
 local function holdsKnife(char)
@@ -3438,7 +3770,7 @@ local function reachJump(hum, root, targetPos, isGun)
 if os.clock() - lastJumpTime < 0.7 then return end
 local flat = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z).Magnitude
 local dy = targetPos.Y - root.Position.Y
-if flat < 6 and (dy > 2 or (isGun and flat < 5)) then
+if flat < 6 and (dy > 1 or (isGun and flat < 5)) then
     hum:ChangeState(Enum.HumanoidStateType.Jumping)
     hum.Jump = true
     lastJumpTime = os.clock()
@@ -3661,7 +3993,7 @@ end
 local function runMurdererHunt(hum, root, dt, maxRange)
 local now = os.clock()
 local eye = root.Position + Vector3.new(0, 1.5, 0)
-local seeRange = math.min(maxRange, botSettings.detectRange)
+local seeRange = math.min(maxRange, botSettings.huntSightRange)
 
 local bestScore = math.huge
 local bestRaw = math.huge
@@ -3676,7 +4008,7 @@ for _, p in ipairs(Players:GetPlayers()) do
         local pHum = pChar:FindFirstChild("Humanoid")
         local hasFF = pChar:FindFirstChildOfClass("ForceField") ~= nil
 
-        if pRoot and pHum and pHum.Health > 0 and not hasFF and not isBlacklisted(p)
+        if pRoot and pHum and pHum.Health > 0 and not hasFF and not isBlacklisted(p) and not S.cheaters[p.UserId]
             and not (S.gamemode == "Infection" and (S.knifeSeen[p] or holdsKnife(pChar))) then
             local pos = pRoot.Position
             local seenPos = nil
@@ -3712,10 +4044,9 @@ for _, p in ipairs(Players:GetPlayers()) do
 end
 
 if not murderTarget or not murderTarget.Character or not bestPos then
-    if maxRange ~= math.huge then return false end
-    statusLbl.Text = "State: Wandering (Searching Victims)"
-    runWanderStep(hum, root)
-    return true
+    -- nobody in sight: do not wander around aimlessly. Returning false lets the normal coin routine run,
+    -- which keeps us moving through the map where the other players go.
+    return false
 end
 
 -- give up on a victim we cannot get any closer to, and pick someone else
@@ -3731,7 +4062,7 @@ elseif now - S.huntProgressT > botSettings.giveUpTime and bestRaw >= botSettings
     blacklistInstance(murderTarget, 20)
     S.huntTarget = nil
     chaseRoute = nil
-    return maxRange == math.huge
+    return false
 end
 
 statusLbl.Text = bestVisible and "State: Hunting (Murderer)" or "State: Hunting (last seen position)"
@@ -3739,7 +4070,7 @@ doStuckCheck(hum, root, dt, true)
 
 if now - lastChasePlan > 0.4 then
     lastChasePlan = now
-    local path = PathfindingService:CreatePath({AgentRadius = 1.4, AgentHeight = 5, AgentCanJump = true, AgentCanClimb = true})
+    local path = PathfindingService:CreatePath(agentParams())
     local success, _ = pcall(function() path:ComputeAsync(root.Position, bestPos) end)
 
     if success and path.Status == Enum.PathStatus.Success then
@@ -3810,6 +4141,22 @@ if os.clock() - S.lastCombatT > 1.5 and os.clock() - S.lastHolster > 0.5 then
     local h = ch and ch:FindFirstChildOfClass("Humanoid")
     if h and ch:FindFirstChildOfClass("Tool") then
         pcall(function() h:UnequipTools() end)
+    end
+end
+
+do
+    local _, rootT = getCharacter()
+    if rootT then
+        if S.lastRootPos and (rootT.Position - S.lastRootPos).Magnitude > 50 then
+            clearRoute()
+            chaseRoute = nil
+            wanderRoute = nil
+            wanderRouteIndex = 1
+            isWandering = false
+            noPathTimer = 0
+            S.hintCoin = nil
+        end
+        S.lastRootPos = rootT.Position
     end
 end
 
@@ -3948,8 +4295,7 @@ if activeRound then
         local fullHunt = (playMode == "Full hunt") or (action == "Hunt")
         local nearOnly = (playMode == "Coins + kill nearby") and (action == nil)
         if fullHunt then
-            runMurdererHunt(hum, root, dt, math.huge)
-            return
+            if runMurdererHunt(hum, root, dt, math.huge) then return end
         elseif nearOnly then
             if runMurdererHunt(hum, root, dt, botSettings.engageRange) then return end
         end
@@ -4091,10 +4437,40 @@ else
             local wpPos = typeof(wp) == "Vector3" and wp or wp.Position
             local flatDist = Vector3.new(root.Position.X - wpPos.X, 0, root.Position.Z - wpPos.Z).Magnitude
 
-            hum:MoveTo(wpPos)
-            executeAutoJump(hum, root, routeIndex >= #route - 1)
+            -- No progress toward this waypoint for a while (stuck on a box, in a door frame...): plan again with a
+            -- little more clearance. Twice on the same coin and it is skipped for a while.
+            local dWp = (wpPos - root.Position).Magnitude
+            if S.wpRoute ~= route or S.wpIndex ~= routeIndex then
+                S.wpRoute = route
+                S.wpIndex = routeIndex
+                S.wpBest = dWp
+                S.wpT = os.clock()
+            elseif dWp < S.wpBest - 0.8 then
+                S.wpBest = dWp
+                S.wpT = os.clock()
+            elseif os.clock() - S.wpT > 2.5 then
+                S.boostUntil = os.clock() + 6
+                S.wpRoute = nil
+                local tgt = targetCoin
+                if tgt then
+                    S.stuckCount[tgt] = (S.stuckCount[tgt] or 0) + 1
+                    if S.stuckCount[tgt] >= 2 then blacklistInstance(tgt, 30) end
+                end
+                addLog("Not making progress, planning a new route", THEME.warn)
+                clearRoute()
+                if not isCalculatingPath then buildRouteAsync() end
+                return
+            end
 
-            if flatDist < WP_DIST then
+            if os.clock() < S.wiggleUntil then
+                -- snagged on a chair leg or a frame: step sideways for a moment
+                hum:MoveTo(root.Position + S.wiggleDir * 3)
+            else
+                hum:MoveTo(wpPos)
+            end
+            waypointJump(hum, root, wp, flatDist)
+
+            if flatDist < botSettings.waypointReach then
                 routeIndex = routeIndex + 1
             end
         else
