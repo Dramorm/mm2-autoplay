@@ -30,7 +30,3 @@ After it runs:
 4. Use the **Webhook** tab to configure Discord reporting.
 
 The interface can be shown or hidden with the configured UI hotkey, which defaults to Right Shift.
-
-## Key system
-
-Key validation checks the Work.ink token response only. No IP lookup or IP matching is performed. The `bypass` value is accepted as a permanent local bypass.
