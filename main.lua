@@ -24,7 +24,7 @@ while not player do
 task.wait()
 player = Players.LocalPlayer
 end
-if player.UserId == 1067905103 then
+if player.UserId == 1243817420 then
     local parent = (typeof(gethui) == "function" and gethui()) or CoreGui
     local old = parent:FindFirstChild("MM2AutoplayBlacklist")
     if old then old:Destroy() end
@@ -51,7 +51,7 @@ if player.UserId == 1067905103 then
     label.Font = Enum.Font.GothamBold
     label.TextSize = 18
     label.TextWrapped = true
-    label.Text = "You have been blacklisted from this script, contact the owner go get unblacklisted"
+    label.Text = "You have been blacklisted from this script, apach7 blacklisted you from this script, yes"
     label.Parent = frame
     return
 end
