@@ -1,4 +1,3 @@
-
 if game.PlaceId ~= 142823291 then
 return
 end
@@ -23,37 +22,6 @@ local player = Players.LocalPlayer
 while not player do
 task.wait()
 player = Players.LocalPlayer
-end
-if player.UserId == 1243817420 then
-    local parent = (typeof(gethui) == "function" and gethui()) or CoreGui
-    local old = parent:FindFirstChild("MM2AutoplayBlacklist")
-    if old then old:Destroy() end
-    local screen = Instance.new("ScreenGui")
-    screen.Name = "MM2AutoplayBlacklist"
-    screen.ResetOnSpawn = false
-    screen.DisplayOrder = 100000
-    screen.Parent = parent
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.fromOffset(520, 150)
-    frame.Position = UDim2.fromScale(0.5, 0.5)
-    frame.AnchorPoint = Vector2.new(0.5, 0.5)
-    frame.BackgroundColor3 = Color3.fromRGB(18, 20, 27)
-    frame.BorderSizePixel = 0
-    frame.Parent = screen
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 10)
-    corner.Parent = frame
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -32, 1, -32)
-    label.Position = UDim2.fromOffset(16, 16)
-    label.BackgroundTransparency = 1
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.Font = Enum.Font.GothamBold
-    label.TextSize = 18
-    label.TextWrapped = true
-    label.Text = "You have been blacklisted from this script, apach7 blacklisted you from this script, yes"
-    label.Parent = frame
-    return
 end
 local function setupJoinMenu()
 local starterGui = game:GetService("StarterGui")
@@ -4690,21 +4658,48 @@ task.spawn(function()
     end
 end)
 
+local function getCoinBalance()
+    local coins
+    pcall(function()
+        local stats = player:FindFirstChild("leaderstats")
+        local value = stats and (stats:FindFirstChild("Coins") or stats:FindFirstChild("Coin"))
+        if value and value.Value ~= nil then
+            coins = tonumber(value.Value)
+        end
+    end)
+    if coins ~= nil then return coins end
+
+    -- MM2 keeps the current event-currency balance in a client table.
+    if type(getgc) == "function" then
+        pcall(function()
+            for _, obj in ipairs(getgc(true)) do
+                if type(obj) == "table" then
+                    local value = rawget(obj, "Candies2026")
+                    if value ~= nil then
+                        local number = tonumber(value)
+                        if number ~= nil then
+                            coins = number
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    return coins
+end
+
 local function queueDiscordStatus()
     local up = os.clock() - startClock
     local flagged = 0
     for _ in pairs(S.cheaters) do flagged = flagged + 1 end
-    local coins = "?"
-    pcall(function()
-        local stats = player:FindFirstChild("leaderstats")
-        local c = stats and (stats:FindFirstChild("Coins") or stats:FindFirstChild("Coin"))
-        if c and c.Value ~= nil then coins = tostring(c.Value) end
-    end)
+    local coinBalance = getCoinBalance()
+    local coins = coinBalance and tostring(coinBalance) or "?"
     local hours = math.max(up / 3600, 1 / 3600)
     local ok = S.discordSend("status", "Status", {
         {name = "Uptime", value = string.format("%dh %02dm", math.floor(up / 3600), math.floor(up / 60) % 60)},
         {name = "Coins", value = coins},
-        {name = "Coins/hour", value = coins ~= "?" and string.format("%.0f", (tonumber(coins) or 0) / hours) or "?"},
+        {name = "Coins/hour", value = coinBalance and string.format("%.0f", coinBalance / hours) or "?"},
         {name = "Cheaters marked", value = tostring(flagged)},
         {name = "Stuck events", value = tostring(tonumber(S.stuckCount) or 0)},
         {name = "Watchdog actions", value = tostring(S.wdResets)},
@@ -4723,17 +4718,13 @@ task.spawn(function()
             local up = os.clock() - startClock
             local flagged = 0
             for _ in pairs(S.cheaters) do flagged = flagged + 1 end
-            local coins = "?"
-            pcall(function()
-                local stats = player:FindFirstChild("leaderstats")
-                local c = stats and (stats:FindFirstChild("Coins") or stats:FindFirstChild("Coin"))
-                if c and c.Value ~= nil then coins = tostring(c.Value) end
-            end)
+            local coinBalance = getCoinBalance()
+            local coins = coinBalance and tostring(coinBalance) or "?"
             local hours = math.max(up / 3600, 1 / 3600)
             S.discordSend("status", "Status", {
                 {name = "Uptime", value = string.format("%dh %02dm", math.floor(up / 3600), math.floor(up / 60) % 60)},
                 {name = "Coins", value = coins},
-                {name = "Coins/hour", value = coins ~= "?" and string.format("%.0f", (tonumber(coins) or 0) / hours) or "?"},
+                {name = "Coins/hour", value = coinBalance and string.format("%.0f", coinBalance / hours) or "?"},
                 {name = "Cheaters marked", value = tostring(flagged)},
                 {name = "Stuck events", value = tostring(tonumber(S.stuckCount) or 0)},
                 {name = "Watchdog actions", value = tostring(S.wdResets)},
@@ -5576,5 +5567,4 @@ if not ok and os.clock() - lastStepError > 5 then
     warn("[MM2Autoplay] " .. tostring(err))
 end
 end)
-
 
