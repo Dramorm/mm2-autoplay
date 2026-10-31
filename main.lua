@@ -1,11 +1,7 @@
--- MM2 Autoplay Script v0.7.12
--- Walking autoplay bot: pathfinding, evasion, role play styles, bag-full actions, configurable UI.
 
 if game.PlaceId ~= 142823291 then
 return
 end
-
--- autoexec can run before the game is ready, wait for it instead of starting half-initialised
 if not game:IsLoaded() then
 game.Loaded:Wait()
 end
@@ -28,10 +24,37 @@ while not player do
 task.wait()
 player = Players.LocalPlayer
 end
-
--- "Play" menu that shows up when a friend is in the server (it blocks spawning until it is clicked).
--- Runs on its own thread right away so nothing else has to wait for it. Several ways of pressing the button are
--- tried one after another, and only a menu that really closed counts as success.
+if player.UserId == 1067905103 then
+    local parent = (typeof(gethui) == "function" and gethui()) or CoreGui
+    local old = parent:FindFirstChild("MM2AutoplayBlacklist")
+    if old then old:Destroy() end
+    local screen = Instance.new("ScreenGui")
+    screen.Name = "MM2AutoplayBlacklist"
+    screen.ResetOnSpawn = false
+    screen.DisplayOrder = 100000
+    screen.Parent = parent
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(520, 150)
+    frame.Position = UDim2.fromScale(0.5, 0.5)
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.BackgroundColor3 = Color3.fromRGB(18, 20, 27)
+    frame.BorderSizePixel = 0
+    frame.Parent = screen
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = frame
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -32, 1, -32)
+    label.Position = UDim2.fromOffset(16, 16)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 18
+    label.TextWrapped = true
+    label.Text = "You have been blacklisted from this script, contact the owner go get unblacklisted"
+    label.Parent = frame
+    return
+end
 local function setupJoinMenu()
 local starterGui = game:GetService("StarterGui")
 local guiService = game:GetService("GuiService")
@@ -43,8 +66,6 @@ local function notify(title, text, duration)
         starterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = duration or 6})
     end)
 end
-
--- visible only if the button and everything above it is visible and still inside PlayerGui
 local function isShown(obj)
     local cur = obj
     while cur and cur ~= playerGui do
@@ -62,9 +83,6 @@ local function findPlay()
     if play and play:IsA("GuiButton") then return play end
     return nil
 end
-
--- Does getconnections really work on this executor? Tested on a harmless dummy event, not on the menu, so a
--- stub that merely exists (or a menu that happened to close for another reason) cannot pass.
 local function getconnectionsWorks()
     if typeof(getconnections) ~= "function" then return false end
     local ok, result = pcall(function()
@@ -136,8 +154,6 @@ local methods = {
         return true
     end},
 }
-
--- returns the name of the method that closed the menu, or nil
 local function tryClose(btn)
     for _, m in ipairs(methods) do
         local ok, used = pcall(m.run, btn)
@@ -154,8 +170,6 @@ local function tryClose(btn)
     end
     return nil
 end
-
--- poll instead of waiting for the button to be added: the menu may already exist but not be visible yet
 local started = os.clock()
 local attempts = 0
 while os.clock() - started < 120 do
@@ -176,7 +190,6 @@ while os.clock() - started < 120 do
         end
 
         if attempts >= 3 then
-            -- nothing worked: at least get the menu off the screen
             local join = playerGui:FindFirstChild("Join")
             if join then join.Enabled = false end
             local loading = playerGui:FindFirstChild("Loading")
@@ -195,13 +208,12 @@ while not camera do
 task.wait()
 camera = workspace.CurrentCamera
 end
-
--- give the game's own scripts a moment to build their GUI and remotes
 task.wait(1.5)
 
-local VERSION = "v0.7.12"
+local VERSION = "v0.8"
 local enabled = true
 local running = true
+local keyGateActive = false
 local alive = false
 
 local targetCoin = nil
@@ -256,7 +268,7 @@ local currentVoteMapName = nil
 local currentVoteTargetPad = nil
 local voteHoldTimer = 0
 
-local WP_DIST = 3.25 -- Decreased minimum waypoint distance threshold by 0.25 studs (from 3.5 to 3.25)
+local WP_DIST = 3.25
 
 local MAP_PRIORITIES = {
 [1] = "Workplace",
@@ -331,11 +343,12 @@ pathCandidates = {1, 5},
 cheaterSpeed = {30, 200},
 huntSightRange = {30, 300},
 cheaterLeniency = {1, 5},
+watchdogMinutes = {2, 20},
+discordStatusMinutes = {5, 120},
+maxDropHeight = {0, 60},
 reportRounds = {1, 3},
 huntMemory = {0, 10},
 }
-
--- Shared runtime state for the newer features (kept in one table to save local slots)
 local S = {
 roundStartClock = os.clock(),
 roundActionDone = false,
@@ -346,14 +359,27 @@ hopCooldownUntil = 0,
 lastHopTry = 0,
 bagFull = false,
 bagCheckClock = 0,
+ragebaitChecked = false,
 settleTime = 4,
 uiConns = {},
 gamemode = "Classic",
 cheaters = {},
+stuckCount = 0,
+stuckByTarget = {},
+wdResets = 0,
+wdExempt = 0,
+hopCount = 0,
 logLines = {},
 cheaterInfo = {},
 wiggleUntil = 0,
 jumpRoute = nil,
+ladders = nil,
+laddersRound = 0,
+ladderScanning = false,
+ladderBlock = setmetatable({}, {__mode = "k"}),
+climbWp = nil,
+climbBest = 0,
+climbT = 0,
 jumpIdx = 0,
 rcRoute = nil,
 rcIndex = 0,
@@ -404,8 +430,26 @@ huntTarget = nil,
 huntBest = math.huge,
 huntProgressT = 0,
 }
+S.isDiscordUrl = function(u)
+    if type(u) ~= "string" then return false end
+    local prefixes = {
+        "https://discord.com/api/webhooks/",
+        "https://discordapp.com/api/webhooks/",
+        "https://ptb.discord.com/api/webhooks/",
+        "https://canary.discord.com/api/webhooks/",
+    }
+    for _, prefix in ipairs(prefixes) do
+        if string.sub(u, 1, #prefix) == prefix then
+            return string.match(string.sub(u, #prefix + 1), "^%d+/[%w_%-]+$") ~= nil
+        end
+    end
+    return false
+end
 
-local settingsFile = "MM2AutoplaySettings_v07.json"
+local dataFolder = "mm2autoplay"
+local settingsFile = dataFolder .. "/settings.json"
+local keyFile = dataFolder .. "/key.txt"
+if makefolder and isfolder and not isfolder(dataFolder) then pcall(makefolder, dataFolder) end
 local DEFAULT_SETTINGS = {
 botEnabled = true,
 autoVoteMap = true,
@@ -425,10 +469,12 @@ hopPingLimit = 200,
 hopMethod = "Public servers",
 innocentMode = "Just coins",
 innocentBagFull = "Stand",
+innocentResetLastTwo = false,
 innocentStandRun = true,
 pickupGun = true,
 sheriffMode = "Just coins",
 sheriffBagFull = "Stand",
+sheriffResetLastTwo = false,
 sheriffStandRun = true,
 sheriffShoot = true,
 sheriffRange = 80,
@@ -436,6 +482,7 @@ sheriffKeepDist = 22,
 aimDelay = 0.25,
 murdererMode = "Full hunt",
 murdererBagFull = "Hunt",
+murdererResetLastTwo = false,
 engageRange = 25,
 stabRange = 12,
 throwKnife = true,
@@ -448,12 +495,25 @@ cheaterDetect = true,
 cheaterSpeed = 60,
 huntSightRange = 150,
 cheaterLeniency = 3,
+cheaterNotify = true,
+maxDropHeight = 25,
+useLadders = true,
+stuckLog = false,
+watchdog = true,
+watchdogMinutes = 5,
+discordUrl = "",
+discordEnabled = false,
+discordCheater = true,
+discordWatchdog = true,
+discordHop = true,
+discordStatus = true,
+discordStatusMinutes = 30,
 directWalk = true,
 pathLog = false,
 smoothPaths = true,
 agentRadius = 1.6,
 waypointReach = 2.0,
-settingsVersion = 2,
+settingsVersion = 3,
 autoReport = false,
 reportRounds = 2,
 huntMemory = 4,
@@ -467,12 +527,20 @@ wanderRadius = 40,
 uiScale = 1,
 uiKey = "RightShift",
 hideOnLoad = false,
+licenseKey = "",
+licenseState = "not checked",
+licenseExpiresAt = 0,
+skipKeySystem = false,
+keyPromptSeen = false,
+keyReminder = true,
 survivorMode = "Just coins",
 survivorBagFull = "Stand",
+survivorResetLastTwo = false,
 survivorStandRun = true,
 survivorShoot = true,
 zombieMode = "Full hunt",
 zombieBagFull = "Hunt",
+zombieResetLastTwo = false,
 }
 
 local botSettings = {}
@@ -483,9 +551,18 @@ end
 local function saveSettings()
 if writefile then
 pcall(function()
+if makefolder and isfolder and not isfolder(dataFolder) then pcall(makefolder, dataFolder) end
 writefile(settingsFile, HttpService:JSONEncode(botSettings))
 end)
 end
+end
+
+local function saveKeyFile(value)
+if not writefile then return end
+pcall(function()
+if makefolder and isfolder and not isfolder(dataFolder) then pcall(makefolder, dataFolder) end
+writefile(keyFile, value or "")
+end)
 end
 
 local function sanitizeSettings()
@@ -502,6 +579,9 @@ end
 if type(botSettings.uiKey) ~= "string" or not pcall(function() return Enum.KeyCode[botSettings.uiKey] end) then
 botSettings.uiKey = DEFAULT_SETTINGS.uiKey
 end
+if type(botSettings.discordUrl) ~= "string" or (botSettings.discordUrl ~= "" and not S.isDiscordUrl(botSettings.discordUrl)) then
+botSettings.discordUrl = ""
+end
 end
 
 local function loadSettings()
@@ -514,13 +594,34 @@ for k, v in pairs(data) do
 if DEFAULT_SETTINGS[k] ~= nil then
 botSettings[k] = v
 end
+
 end
--- saved by an older version: switch to the new default hop method once
 if (tonumber(data.settingsVersion) or 1) < 2 then
 botSettings.hopMethod = DEFAULT_SETTINGS.hopMethod
 end
+if (tonumber(data.settingsVersion) or 1) < 3 then
+botSettings.smoothPaths = DEFAULT_SETTINGS.smoothPaths
+end
 botSettings.settingsVersion = DEFAULT_SETTINGS.settingsVersion
 end
+end
+if isfile and readfile and isfile(keyFile) then
+    local ok, savedKey = pcall(readfile, keyFile)
+    if ok and type(savedKey) == "string" then
+        savedKey = savedKey:gsub("^%s+", ""):gsub("%s+$", "")
+        if savedKey == "skipped" then
+            botSettings.skipKeySystem = true
+            botSettings.licenseState = "skipped"
+        elseif savedKey ~= "" and #savedKey <= 512 then
+            botSettings.licenseKey = savedKey
+            botSettings.keyPromptSeen = true
+        end
+        if savedKey == "skipped" then botSettings.keyPromptSeen = true end
+    end
+end
+if type(botSettings.licenseKey) ~= "string" or #botSettings.licenseKey > 512 then
+    botSettings.licenseKey = ""
+    botSettings.licenseState = "not checked"
 end
 sanitizeSettings()
 botSettings.botEnabled = true
@@ -597,7 +698,7 @@ local setBotEnabled
 local function buildUI()
 local FONT = Enum.Font.GothamMedium
 local FONT_BOLD = Enum.Font.GothamBold
-local WIN_W, WIN_H = 560, 410
+    local WIN_W, WIN_H = 560, 410
 local ui = {}
 local orderCounter = 0
 
@@ -675,8 +776,6 @@ end
 local function isMove(input)
     return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
 end
-
--- Root -------------------------------------------------------------------
 local guiContainer = (typeof(gethui) == "function" and gethui()) or CoreGui
 local old = guiContainer:FindFirstChild("MM2AutoplayUI")
 if old then old:Destroy() end
@@ -710,8 +809,6 @@ local function applyScale(v)
     scale.Scale = math.max(0.5, math.min(v, fit))
 end
 applyScale(botSettings.uiScale)
-
--- Title bar ----------------------------------------------------------------
 local titleBar = create("Frame", {
     Size = UDim2.new(1, 0, 0, 38),
     BackgroundTransparency = 1,
@@ -765,8 +862,6 @@ function ui.setBadge(state)
     statusPill.Text = state and "Running" or "Stopped"
     statusPill.TextColor3 = state and THEME.good or THEME.bad
 end
-
--- Dragging
 local dragging, dragStart, startPos = false, nil, nil
 listen(titleBar.InputBegan, function(input)
     if isPress(input) then
@@ -788,8 +883,6 @@ end)
 listen(UserInputService.InputEnded, function(input)
     if isPress(input) then dragging = false end
 end)
-
--- Sidebar and content ----------------------------------------------------------
 local sidebar = create("Frame", {
     Size = UDim2.new(0, 132, 1, -39),
     Position = UDim2.fromOffset(0, 39),
@@ -797,13 +890,11 @@ local sidebar = create("Frame", {
     BorderSizePixel = 0,
 }, window)
 round(sidebar, 10)
--- square off the top edge so the sidebar meets the divider cleanly
 create("Frame", {
     Size = UDim2.new(1, 0, 0, 12),
     BackgroundColor3 = THEME.panel,
     BorderSizePixel = 0,
 }, sidebar)
--- and the right edge so it meets the content area
 create("Frame", {
     Size = UDim2.new(0, 12, 1, 0),
     AnchorPoint = Vector2.new(1, 0),
@@ -896,8 +987,6 @@ local function addPage(name, index)
     pages[name] = page
     return page
 end
-
--- Components ------------------------------------------------------------------
 local function section(page, title)
     textLabel(page, {
         Size = UDim2.new(1, 0, 0, 24),
@@ -1091,6 +1180,72 @@ local function addNumberInput(parent, text, key)
             saveSettings()
         end
         box.Text = tostring(botSettings[key])
+    end)
+    return {row = row}
+end
+
+local function addNote(parent, text)
+    local lbl = textLabel(parent, {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Text = text,
+        TextSize = 11,
+        TextColor3 = THEME.muted,
+        TextWrapped = true,
+        LayoutOrder = nextOrder(),
+    })
+    padding(lbl, 6, 12, 6, 12)
+    return lbl
+end
+
+local function addTextInput(parent, text, key, placeholder, validate, mask)
+    local row = makeRow(parent, 34)
+    textLabel(row, {Size = UDim2.new(0, 100, 1, 0), Position = UDim2.fromOffset(12, 0), Text = text})
+    local box = create("TextBox", {
+        Size = UDim2.new(1, -132, 0, 24),
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -12, 0.5, 0),
+        BackgroundColor3 = THEME.panel,
+        BorderSizePixel = 0,
+        Font = FONT,
+        TextSize = 12,
+        TextColor3 = THEME.text,
+        PlaceholderText = placeholder or "",
+        PlaceholderColor3 = THEME.muted,
+        ClearTextOnFocus = false,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "",
+    }, row)
+    padding(box, 0, 6, 0, 6)
+    round(box, 5)
+    local boxStroke = outline(box, THEME.border)
+
+    local function shown(v)
+        if mask and v ~= "" then return mask(v) end
+        return v
+    end
+    local initialValue = tostring(botSettings[key] or "")
+    if key == "licenseKey" and #initialValue > 512 then
+        initialValue = ""
+        botSettings[key] = ""
+        botSettings.licenseState = "not checked"
+    end
+    box.Text = shown(initialValue)
+
+    listen(box.Focused, function()
+        boxStroke.Color = THEME.accent
+        box.Text = botSettings[key]
+    end)
+    listen(box.FocusLost, function()
+        boxStroke.Color = THEME.border
+        local v = string.match(box.Text, "^%s*(.-)%s*$")
+        if key == "licenseKey" then v = string.sub(v, 1, 512) end
+        if not validate or validate(v) then
+            botSettings[key] = v
+            saveSettings()
+        end
+        box.Text = shown(botSettings[key])
     end)
     return {row = row}
 end
@@ -1376,27 +1531,41 @@ local function addKeybind(parent, text)
             refresh()
             return
         end
-        if processed then return end
         local ok, key = pcall(function() return Enum.KeyCode[botSettings.uiKey] end)
-        if ok and key and input.KeyCode == key then
+        if not keyGateActive and ok and key and input.KeyCode == key then
             window.Visible = not window.Visible
         end
     end)
     refresh()
     return {row = row}
 end
-
--- Pages -------------------------------------------------------------------------
-local controlPage = addPage("Control", 1)
+local controlPage = addPage("Home", 1)
 local rolesPage = addPage("Classic", 2)
 local infectionPage = addPage("Infection", 3)
 local coinsPage = addPage("Coins", 4)
 local tuningPage = addPage("Tuning", 5)
 local visualsPage = addPage("Visuals", 6)
 local serverPage = addPage("Server", 7)
-local settingsPage = addPage("Settings", 8)
-
--- Control
+local discordPage = addPage("Webhook", 8)
+local settingsPage = addPage("Settings", 9)
+local keyCard = section(controlPage, "Key system")
+if botSettings.licenseState == "valid" then
+    addNote(keyCard, "You completed the key system.")
+    local remaining = math.max(0, (tonumber(botSettings.licenseExpiresAt) or 0) / 1000 - os.time())
+    addNote(keyCard, string.format("Key valid for %dd %02dh %02dm.", math.floor(remaining / 86400), math.floor(remaining / 3600) % 24, math.floor(remaining / 60) % 60))
+else
+    addNote(keyCard, "Enter a Work.ink key to unlock the script. No IP checks are performed.")
+    addTextInput(keyCard, "Key", "licenseKey", "Paste your Work.ink key", nil, nil)
+    addButton(keyCard, "Get key", function()
+    local url = "https://work.ink/38gS/key-system"
+    if typeof(setclipboard) == "function" then pcall(setclipboard, url) end
+    ui.addLog("Key link copied: " .. url, THEME.muted)
+    end, false)
+    addButton(keyCard, "Check key", function()
+    if S.checkLicense then S.checkLicense() else ui.addLog("Key checker is still initializing", THEME.warn) end
+    end, false)
+end
+addNote(keyCard, "You may reset at 49 coins if you skipped the key and enabled the current role's reset toggle.")
 local statusCard = section(controlPage, "Status")
 local function statusRow(text, color)
     local lbl = textLabel(statusCard, {
@@ -1420,6 +1589,8 @@ addToggle(behaviorCard, "Bot enabled", "botEnabled", function(v) setBotEnabled(v
 addToggle(behaviorCard, "Auto vote map", "autoVoteMap")
 addToggle(behaviorCard, "Jump at path jump points", "autoJump")
 addToggle(behaviorCard, "Anti-fling (no player collisions)", "antiFling")
+addToggle(behaviorCard, "Softlock watchdog", "watchdog")
+addSlider(behaviorCard, "Watchdog timeout", "watchdogMinutes", 1, "%.0f min")
 
 local logCard = section(controlPage, "Event log")
 local logHolder = makeRow(logCard, 150)
@@ -1446,6 +1617,22 @@ addButton(logCard, "Copy log to clipboard", function()
     elseif writefile then
         pcall(writefile, "MM2AutoplayLog.txt", text)
         ui.addLog("No clipboard function: saved to MM2AutoplayLog.txt in your executor's workspace folder.", THEME.good)
+    else
+        ui.addLog("This executor can neither copy nor save files.", THEME.warn)
+    end
+end, false)
+
+addButton(logCard, "Copy stuck summary", function()
+    local text = S.stuckSummary and S.stuckSummary() or "nothing recorded yet"
+    if typeof(setclipboard) == "function" then
+        pcall(setclipboard, text)
+        ui.addLog("Stuck summary copied to the clipboard.", THEME.good)
+    elseif typeof(toclipboard) == "function" then
+        pcall(toclipboard, text)
+        ui.addLog("Stuck summary copied to the clipboard.", THEME.good)
+    elseif writefile then
+        pcall(writefile, "MM2StuckSummary.txt", text)
+        ui.addLog("No clipboard function: saved to MM2StuckSummary.txt in your executor's workspace folder.", THEME.good)
     else
         ui.addLog("This executor can neither copy nor save files.", THEME.warn)
     end
@@ -1480,8 +1667,6 @@ function ui.addLog(msg, color)
         end)
     end)
 end
-
--- Roles
 local innCard = section(rolesPage, "Innocent")
 addDropdown(innCard, "Play style", "innocentMode", CHOICES.basicMode)
 addToggle(innCard, "Pick up dropped gun", "pickupGun")
@@ -1489,7 +1674,8 @@ local innStand
 addDropdown(innCard, "When bag is full", "innocentBagFull", CHOICES.bagBasic, function(v)
     innStand.row.Visible = (v == "Stand")
 end)
-innStand = addCheckbox(innCard, "Run from murderer", "innocentStandRun")
+addToggle(innCard, "Reset if last 2 alive", "innocentResetLastTwo")
+innStand = addToggle(innCard, "Run from murderer", "innocentStandRun")
 innStand.row.Visible = (botSettings.innocentBagFull == "Stand")
 
 local shCard = section(rolesPage, "Sheriff")
@@ -1502,7 +1688,8 @@ local shStand
 addDropdown(shCard, "When bag is full", "sheriffBagFull", CHOICES.bagBasic, function(v)
     shStand.row.Visible = (v == "Stand")
 end)
-shStand = addCheckbox(shCard, "Run from murderer", "sheriffStandRun")
+addToggle(shCard, "Reset if last 2 alive", "sheriffResetLastTwo")
+shStand = addToggle(shCard, "Run from murderer", "sheriffStandRun")
 shStand.row.Visible = (botSettings.sheriffBagFull == "Stand")
 
 local muCard = section(rolesPage, "Murderer")
@@ -1513,8 +1700,7 @@ addToggle(muCard, "Throw knife", "throwKnife")
 addSlider(muCard, "Engage range", "engageRange", 1, "%.0f studs")
 addSlider(muCard, "Stab range", "stabRange", 1, "%.0f studs")
 addDropdown(muCard, "When bag is full", "murdererBagFull", CHOICES.bagMurderer)
-
--- Infection (zombies with knives, survivors with guns)
+addToggle(muCard, "Reset if last 2 alive", "murdererResetLastTwo")
 local surCard = section(infectionPage, "Survivor (has a gun)")
 addDropdown(surCard, "Play style", "survivorMode", CHOICES.basicMode)
 addToggle(surCard, "Shoot zombies on sight", "survivorShoot")
@@ -1522,14 +1708,14 @@ local surStand
 addDropdown(surCard, "When bag is full", "survivorBagFull", CHOICES.bagBasic, function(v)
     surStand.row.Visible = (v == "Stand")
 end)
-surStand = addCheckbox(surCard, "Run from zombies", "survivorStandRun")
+addToggle(surCard, "Reset if last 2 alive", "survivorResetLastTwo")
+surStand = addToggle(surCard, "Run from zombies", "survivorStandRun")
 surStand.row.Visible = (botSettings.survivorBagFull == "Stand")
 
 local zomCard = section(infectionPage, "Zombie (has a knife)")
 addDropdown(zomCard, "Play style", "zombieMode", CHOICES.murdererMode)
 addDropdown(zomCard, "When bag is full", "zombieBagFull", CHOICES.bagMurderer)
-
--- Coins
+addToggle(zomCard, "Reset if last 2 alive", "zombieResetLastTwo")
 local planCard = section(coinsPage, "Routing")
 addToggle(planCard, "Plan next coin ahead", "planAhead")
 addToggle(planCard, "Skip coins near murderer", "avoidMurdererCoins")
@@ -1538,8 +1724,6 @@ addSlider(planCard, "Compare walking paths of nearest coins", "pathCandidates", 
 local nearCard = section(coinsPage, "Nearby coins")
 addToggle(nearCard, "Grab coins that appear near me", "grabNearby")
 addSlider(nearCard, "Nearby coin radius", "nearbyRadius", 1, "%.0f studs")
-
--- Tuning
 local awareCard = section(tuningPage, "Awareness")
 addSlider(awareCard, "Murderer detection range", "detectRange", 5, "%.0f studs")
 addSlider(awareCard, "Evade distance", "evadeDistance", 1, "%.0f studs")
@@ -1547,13 +1731,13 @@ addSlider(awareCard, "Chase memory after losing sight", "huntMemory", 1, "%.0f s
 local moveCard = section(tuningPage, "Movement")
 addSlider(moveCard, "Wander radius", "wanderRadius", 5, "%.0f studs")
 addToggle(moveCard, "Straight-line shortcut", "directWalk")
-addToggle(moveCard, "Smooth paths (cut corners safely)", "smoothPaths")
+addSlider(moveCard, "Max drop height (0 = never)", "maxDropHeight", 1, "%.0f studs")
+addToggle(moveCard, "Climb detected ladders", "useLadders")
 addToggle(moveCard, "Log route building", "pathLog")
+addToggle(moveCard, "Record stuck spots to file", "stuckLog")
 addSlider(moveCard, "Agent radius (clearance)", "agentRadius", 0.1, "%.1f studs")
 addSlider(moveCard, "Waypoint reach", "waypointReach", 0.1, "%.1f studs")
 addSlider(moveCard, "Give up if not getting closer", "giveUpTime", 1, "%.0f s")
-
--- Visuals
 local visCard = section(visualsPage, "Overlays")
 addToggle(visCard, "Player ESP", "playerEsp")
 addToggle(visCard, "Coin ESP", "coinEsp")
@@ -1562,6 +1746,7 @@ addToggle(visCard, "Path ESP", "pathEsp", function(v)
     if not v then clearRoute() end
 end)
 addToggle(visCard, "Cheater detector (purple)", "cheaterDetect")
+addToggle(visCard, "Notify when a cheater is found", "cheaterNotify")
 addSlider(visCard, "Cheater speed threshold", "cheaterSpeed", 5, "%.0f studs/s")
 addSlider(visCard, "Cheater detector leniency", "cheaterLeniency", 1, "%.0f")
 addToggle(visCard, "Auto-report flagged cheaters", "autoReport")
@@ -1570,8 +1755,6 @@ addToggle(visCard, "Debug rays", "debugRays", function(v)
     if not v then debugFolder:ClearAllChildren() end
 end)
 addButton(visCard, "Clear cheater marks", function() S.cheaters = {}; S.cheaterInfo = {} end, false)
-
--- Server
 local hopCard = section(serverPage, "Server hop")
 addDropdown(hopCard, "Hop method", "hopMethod", CHOICES.hopMethod)
 addToggleInput(hopCard, "Hop if fewer than (players)", "hopIfFewer", "hopFewerThan")
@@ -1580,8 +1763,28 @@ addToggle(hopCard, "Hop if alone", "hopIfAlone")
 addToggle(hopCard, "Hop on high ping", "autoHopPing")
 addSlider(hopCard, "Ping limit", "hopPingLimit", 25, "%.0f ms")
 addButton(hopCard, "Hop now", function() performServerHop() end, false)
-
--- Settings
+local dcCard = section(discordPage, "Webhook")
+addNote(dcCard, "Create one in Discord: Server Settings, Integrations, Webhooks. The address is saved in the settings file as plain text, so never share that file.")
+addTextInput(dcCard, "Webhook URL", "discordUrl", "https://discord.com/api/webhooks/...", function(v)
+    if v == "" or S.isDiscordUrl(v) then return true end
+    ui.addLog("That is not a Discord webhook URL, nothing saved", THEME.warn)
+    return false
+end, function(v)
+    return (string.match(v, "^(https://[^/]+/api/webhooks/)") or "") .. "********"
+end)
+addToggle(dcCard, "Send to Discord", "discordEnabled")
+addButton(dcCard, "Send Discord status now", function()
+    if S.sendStatusNow then S.sendStatusNow() else addLog("Discord status is still initializing", THEME.warn) end
+end, false)
+addButton(dcCard, "Send test message", function()
+    if S.discordTest then S.discordTest() end
+end, false)
+local dcEvents = section(discordPage, "What to send")
+addToggle(dcEvents, "Cheater found", "discordCheater")
+addToggle(dcEvents, "Softlock watchdog actions", "discordWatchdog")
+addToggle(dcEvents, "Server hops and bot start", "discordHop")
+addToggle(dcEvents, "Status report", "discordStatus")
+addSlider(dcEvents, "Status every (minutes)", "discordStatusMinutes", 5, "%.0f min")
 local uiCard = section(settingsPage, "Interface")
 addKeybind(uiCard, "Show / hide key")
 addToggle(uiCard, "Hide UI on load", "hideOnLoad")
@@ -1589,10 +1792,15 @@ addSlider(uiCard, "UI scale", "uiScale", 0.05, "%.2fx", function(v) applyScale(v
 local scriptCard = section(settingsPage, "Script")
 addButton(scriptCard, "Unload script", function() fullUnload() end, true)
 
-selectTab("Control")
+selectTab("Home")
 if botSettings.hideOnLoad then
     window.Visible = false
 end
+ui.create = create
+ui.round = round
+ui.outline = outline
+ui.textLabel = textLabel
+ui.listen = listen
 return ui
 end
 
@@ -1605,7 +1813,94 @@ local mapVoteStatusLbl = UI.mapVoteStatusLbl
 local bagLbl = UI.bagLbl
 local addLog = UI.addLog
 
+local keyFilePresent = isfile and isfile(keyFile)
+local keyGateRequired = not keyFilePresent
+keyGateActive = keyGateRequired
+if keyGateRequired then
+    botSettings.botEnabled = false
+    enabled = false
+    running = false
+    UI.window.Visible = false
+end
+
 addLog("Script " .. VERSION .. " initialized and active.", THEME.good)
+if keyGateRequired then
+    local prompt = UI.create("Frame", {
+        Name = "KeyPrompt",
+        Size = UDim2.fromOffset(520, 300),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        BackgroundColor3 = THEME.panel,
+        BorderSizePixel = 0,
+        ZIndex = 50,
+        Active = true,
+        Draggable = true,
+    }, UI.gui)
+    UI.round(prompt, 10)
+    UI.outline(prompt, THEME.borderStrong)
+    UI.textLabel(prompt, {Size = UDim2.new(1, -32, 0, 28), Position = UDim2.fromOffset(16, 16), Text = "Key system", TextSize = 16, TextColor3 = THEME.text, ZIndex = 51})
+    UI.textLabel(prompt, {Size = UDim2.new(1, -32, 0, 65), Position = UDim2.fromOffset(16, 52), Text = "Enter your key below to unlock the bot. Get key copies the redemption link so you can redeem one, and Check key verifies it.", TextWrapped = true, TextColor3 = THEME.muted, ZIndex = 51})
+    local keyBox = UI.create("TextBox", {Size = UDim2.new(1, -32, 0, 34), Position = UDim2.fromOffset(16, 112), PlaceholderText = "Paste key here", Text = botSettings.licenseKey or "", ClearTextOnFocus = false, Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = THEME.text, BackgroundColor3 = THEME.surface, BorderSizePixel = 0, ZIndex = 51}, prompt)
+    UI.round(keyBox, 5)
+    UI.outline(keyBox, THEME.border)
+    local getKey = UI.create("TextButton", {Size = UDim2.new(0.48, -20, 0, 36), Position = UDim2.fromOffset(16, 160), Text = "Get key", Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = THEME.text, BackgroundColor3 = THEME.surface, BorderSizePixel = 0, ZIndex = 51}, prompt)
+    local checkKey = UI.create("TextButton", {Size = UDim2.new(0.48, -20, 0, 36), Position = UDim2.new(0.52, 4, 0, 160), Text = "Check key", Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = THEME.text, BackgroundColor3 = THEME.surface, BorderSizePixel = 0, ZIndex = 51}, prompt)
+    local skip = UI.create("TextButton", {Size = UDim2.new(1, -32, 0, 46), Position = UDim2.fromOffset(16, 218), Text = "SKIP PLS I HATE KEY SYSTEMS", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = Color3.new(1, 1, 1), BackgroundColor3 = THEME.accent, BorderSizePixel = 0, ZIndex = 51}, prompt)
+    UI.round(getKey, 5)
+    UI.outline(getKey, THEME.border)
+    UI.round(checkKey, 5)
+    UI.outline(checkKey, THEME.border)
+    UI.round(skip, 5)
+    UI.outline(skip, THEME.border)
+    local keyStatus = UI.textLabel(prompt, {Size = UDim2.new(1, -32, 0, 22), Position = UDim2.fromOffset(16, 270), Text = "Waiting for a key.", TextColor3 = THEME.muted, ZIndex = 51})
+    S.keyStatusLabel = keyStatus
+    UI.listen(getKey.MouseButton1Click, function()
+        local url = "https://work.ink/38gS/key-system"
+        local copied = false
+        if typeof(setclipboard) == "function" then copied = pcall(setclipboard, url) end
+        keyStatus.Text = copied and "Copied the key link to your clipboard." or "Clipboard unavailable. Open the link manually: " .. url
+        keyStatus.TextColor3 = copied and THEME.good or THEME.warn
+    end)
+    UI.listen(checkKey.MouseButton1Click, function()
+        botSettings.licenseKey = keyBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
+        keyStatus.Text = botSettings.licenseKey == "" and "Enter a key before checking." or "Checking key..."
+        keyStatus.TextColor3 = THEME.muted
+        if S.checkLicense then S.checkLicense() end
+    end)
+    S.onLicenseValid = function()
+        prompt:Destroy()
+        keyGateActive = false
+        UI.window.Visible = true
+        if setBotEnabled then setBotEnabled(true) end
+        addLog("Key redeemed; script unlocked.", THEME.good)
+    end
+    UI.listen(skip.MouseButton1Click, function()
+        botSettings.skipKeySystem = true
+        botSettings.licenseState = "skipped"
+        botSettings.keyPromptSeen = true
+        saveKeyFile("skipped")
+        saveSettings()
+        prompt:Destroy()
+        keyGateActive = false
+        UI.window.Visible = true
+        if setBotEnabled then setBotEnabled(true) end
+        local warning = UI.create("TextLabel", {
+            Size = UDim2.new(1, -40, 0, 80),
+            Position = UDim2.fromScale(0.5, 0.5),
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundTransparency = 1,
+            Text = "YOU WILL REGRET THIS...",
+            TextColor3 = THEME.bad,
+            TextStrokeTransparency = 0.25,
+            Font = Enum.Font.GothamBlack,
+            TextSize = 34,
+            TextWrapped = true,
+            ZIndex = 100,
+        }, UI.gui)
+        task.delay(5, function() if warning and warning.Parent then warning:Destroy() end end)
+        addLog("Key system skipped; the visible 49-coin warning applies.", THEME.warn)
+    end)
+end
 
 local heartbeatConnection = nil
 local serverHopThread = nil
@@ -1667,6 +1962,7 @@ enabled = false
 running = false
 S.hopCancel = true
 S.unloaded = true
+if S.flushStuck then pcall(S.flushStuck) end
 if heartbeatConnection then pcall(function() heartbeatConnection:Disconnect() end) end
 if serverHopThread then pcall(function() task.cancel(serverHopThread) end) end
 if antiAfkThread then pcall(function() task.cancel(antiAfkThread) end) end
@@ -1698,8 +1994,6 @@ end
 
 local VISITED_FILE = "MM2VisitedServers.json"
 local HOP_HOSTS = {"games.roblox.com"}
-
--- Tries several ways of making the request and returns (body, nil) or (nil, reason).
 local function httpGetRaw(url)
 local lastErr = "no HTTP function available"
 
@@ -1774,8 +2068,6 @@ if writefile then
     pcall(function() writefile(VISITED_FILE, HttpService:JSONEncode(data)) end)
 end
 end
-
--- The game's own teleport request (the "MM2" method)
 local function hopViaMM2()
 pcall(function()
     local teleportEvent = ReplicatedStorage:FindFirstChild("Remotes")
@@ -1789,10 +2081,6 @@ pcall(function()
     end
 end)
 end
-
--- Public server list hop: walks the public server list, skips servers already tried this hour,
--- and moves on to the next candidate if the teleport has not happened after 5 seconds.
--- If the list cannot be loaded it logs why, switches host, and eventually falls back to the MM2 method.
 local function hopPublicServers()
 if S.hopping then return end
 S.hopping = true
@@ -1823,8 +2111,6 @@ task.spawn(function()
             failures = failures + 1
             totalFailures = totalFailures + 1
             addLog("Server list failed (" .. host .. "): " .. string.sub(tostring(err), 1, 70), THEME.warn)
-
-            -- cursors belong to one host, so start over when switching
             hostIndex = (hostIndex % #HOP_HOSTS) + 1
             cursor = ""
 
@@ -1855,10 +2141,6 @@ task.spawn(function()
             end
         else
             failures = 0
-
-            -- Same rules as the "hop if fewer / more than" settings decide which server we pick. After joining
-            -- there will be playing + 1 players. Never lower than 2 players: everybody loves joining empty
-            -- 1-player servers, so those fill up or leave us with nobody to play with.
             local minWanted = 2
             local maxWanted = 12
             if botSettings.hopIfFewer then minWanted = math.max(2, botSettings.hopFewerThan) end
@@ -1921,6 +2203,10 @@ end)
 end
 
 function performServerHop()
+S.hopCount = S.hopCount + 1
+if S.discordSend then
+    S.discordSend("hop", "Server hop", {{name = "Method", value = botSettings.hopMethod}, {name = "Map", value = S.currentMapName and S.currentMapName() or "?"}})
+end
 statusLbl.Text = "State: Hopping Servers..."
 addLog("Requesting server hop (" .. botSettings.hopMethod .. ")...", THEME.warn)
 
@@ -2107,9 +2393,6 @@ if not obj then return false end
 local name = obj.Name:lower()
 return name:find("coin") or name == "coin_server" or name == "gold"
 end
-
--- Cached lookups. The old code searched the whole workspace (FindFirstChild(..., true) / GetDescendants)
--- several times per frame, which is what caused the lag. These keep the result and refresh it on a timer.
 local function getCoinContainer()
 local c = S.coinContainer
 if c and c.Parent then return c end
@@ -2130,7 +2413,6 @@ if now - S.coinListT >= interval then
     S.coinListT = now
     local list = {}
     for _, item in ipairs((container or workspace):GetDescendants()) do
-        -- isCoin only checks the name, so skip value objects etc. that happen to have "coin" in it
         if isCoin(item) and item:IsA("PVInstance") then
             list[#list + 1] = item
         end
@@ -2175,8 +2457,6 @@ end
 local function getThrowRemote()
 return findRemote("throwRemote", "KnifeThrown")
 end
-
--- Temporary blacklist for targets (coins, the gun, players) we failed to reach. Entries expire on their own.
 local function blacklistInstance(inst, seconds)
 S.blacklist[inst] = os.clock() + seconds
 end
@@ -2190,9 +2470,6 @@ if os.clock() >= t then
 end
 return true
 end
-
--- For targets floating in the air (like a dropped gun), path to the ground underneath instead.
--- The bot then jumps for the last bit (see reachJump).
 local function groundBelow(pos)
 local ignore = {visFolder, debugFolder}
 if player.Character then table.insert(ignore, player.Character) end
@@ -2205,8 +2482,6 @@ if hit and (pos.Y - hit.Position.Y) > 3.5 then
 end
 return pos, 0
 end
-
--- true when something solid sits between the two points (coins themselves do not count)
 local wallParams = RaycastParams.new()
 wallParams.FilterType = Enum.RaycastFilterType.Exclude
 wallParams.RespectCanCollide = true
@@ -2221,18 +2496,18 @@ local inst = hit.Instance
 if isCoin(inst) or (inst.Parent and isCoin(inst.Parent)) then return false end
 return true
 end
-
--- A waypoint counts as reached when we cross the plane through it (perpendicular to the leg we are walking), not
--- when we are inside some radius. No overshooting and turning back, no cutting corners into door frames.
--- This is the approach Roblox's own pathfinding guide recommends.
 local function waypointReached(root, wps, idx)
 local wp = wps[idx]
 local wpPos = typeof(wp) == "Vector3" and wp or wp.Position
 local rootPos = root.Position
-local toRoot = Vector3.new(rootPos.X - wpPos.X, 0, rootPos.Z - wpPos.Z)
-if toRoot.Magnitude < 1.2 then return true end
+if type(wp) == "table" and wp.Climb then
+    return (rootPos.Y - 3) >= wpPos.Y - 1.5
+end
 
--- where did this leg start?
+local toRoot = Vector3.new(rootPos.X - wpPos.X, 0, rootPos.Z - wpPos.Z)
+if math.abs(rootPos.Y - wpPos.Y) > 4.5 then return false end
+
+if toRoot.Magnitude < 1.2 then return true end
 if S.rcRoute ~= wps or S.rcIndex ~= idx then
     S.rcRoute = wps
     S.rcIndex = idx
@@ -2248,23 +2523,49 @@ local seg = Vector3.new(wpPos.X - S.rcFrom.X, 0, wpPos.Z - S.rcFrom.Z)
 if seg.Magnitude < 0.5 then return toRoot.Magnitude < botSettings.waypointReach end
 
 local normal = seg.Unit
-local along = toRoot:Dot(normal)                       -- > 0: we are past the plane through the waypoint
-local lateral = (toRoot - normal * along).Magnitude    -- how far off the line we are
+local along = toRoot:Dot(normal)
+local lateral = (toRoot - normal * along).Magnitude
 local v = root.AssemblyLinearVelocity
 local speed = Vector3.new(v.X, 0, v.Z).Magnitude
--- a little early at speed so turns are smooth, but never when far off to the side
 return along > -(0.3 + speed * 0.06) and lateral < 3.5
 end
-
--- One movement driver for every route the bot follows (coins, chasing, wandering, map vote).
--- It walks to the waypoint. The ONLY jumping it does is at waypoints the path itself marks as Jump, once per
--- waypoint. Nothing jumps on its own: no engine auto-jump, no "looks blocked so jump" guessing.
 local function moveAlongWaypoint(hum, root, wps, idx)
 local wp = wps[idx]
 local wpPos = typeof(wp) == "Vector3" and wp or wp.Position
 local now = os.clock()
-
--- path-marked jump, once per waypoint, when we are at the take-off point
+if type(wp) == "table" and wp.Climb then
+    local L = wp.Ladder
+    local state = hum:GetState()
+    local height = root.Position.Y
+    if S.climbWp ~= wp then
+        S.climbWp = wp
+        S.climbBest = height
+        S.climbT = now
+        addLog(string.format("Climbing a ladder (%s, %.0f studs)", tostring(L and L.kind), wpPos.Y - (height - 3)), THEME.muted)
+    end
+    if height > S.climbBest + 0.5 then
+        S.climbBest = height
+        S.climbT = now
+    end
+    if now - S.climbT > 3.5 then
+        if L then S.ladderBlock[L] = now + 90 end
+        S.climbWp = nil
+        addLog("Could not climb that ladder, skipping it for a while", THEME.warn)
+        if S.recordStuck then S.recordStuck("ladder-failed", root, tostring(L and L.kind), nil) end
+        clearRoute()
+        chaseRoute = nil
+        return wpPos
+    end
+    local flatToLadder = Vector3.new(root.Position.X - wpPos.X, 0, root.Position.Z - wpPos.Z).Magnitude
+    if L and L.kind ~= "truss" and state ~= Enum.HumanoidStateType.Climbing and flatToLadder < 3.2
+        and now - lastJumpTime > 0.7 and (height - 3) < wpPos.Y - 1.5 then
+        lastJumpTime = now
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        hum.Jump = true
+    end
+    hum:MoveTo(Vector3.new(wpPos.X, math.min(wpPos.Y + 1.5, height + 6), wpPos.Z))
+    return wpPos
+end
 if botSettings.autoJump and typeof(wp) ~= "Vector3" and wp.Action == Enum.PathWaypointAction.Jump
     and not (S.jumpRoute == wps and S.jumpIdx == idx) and now - lastJumpTime > 0.5 then
     local flat = Vector3.new(root.Position.X - wpPos.X, 0, root.Position.Z - wpPos.Z).Magnitude
@@ -2280,8 +2581,6 @@ if botSettings.autoJump and typeof(wp) ~= "Vector3" and wp.Action == Enum.PathWa
         hum.Jump = true
     end
 end
-
--- barely moving although we want to: step sideways, and say what is in the way so it can be dealt with
 local v = root.AssemblyLinearVelocity
 local flatSpeed = Vector3.new(v.X, 0, v.Z).Magnitude
 if hum.MoveDirection.Magnitude > 0.1 and flatSpeed < 4 and hum.FloorMaterial ~= Enum.Material.Air then
@@ -2298,6 +2597,7 @@ if hum.MoveDirection.Magnitude > 0.1 and flatSpeed < 4 and hum.FloorMaterial ~= 
             if hit and hit.Instance then
                 local sz = hit.Instance.Size
                 addLog(string.format("Blocked by %s (%s, %.1f x %.1f x %.1f)", hit.Instance.Name, hit.Instance.ClassName, sz.X, sz.Y, sz.Z), THEME.warn)
+                if S.recordStuck then S.recordStuck("blocked", root, "waypoint " .. idx, hit.Instance) end
             end
         end
     end
@@ -2553,7 +2853,6 @@ if getCoinContainer() then
 elseif getGunDropInstance() then
     result = true
 else
-    -- slow fallback (whole-workspace scan), limited to once every 2 seconds
     if now - S.roundScanT >= 2 then
         S.roundScanT = now
         S.roundScanValue = false
@@ -2611,8 +2910,6 @@ local function getTorso(char)
 if not char then return nil end
 return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
 end
-
--- Line-of-sight check to prevent shooting through walls
 local function hasLineOfSight(origin, targetPos, ignoreChar)
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -2670,9 +2967,6 @@ local function resetTracking()
 S.knifeSeen = setmetatable({}, {__mode = "k"})
 S.huntSeen = setmetatable({}, {__mode = "k"})
 end
-
--- Infection: zombies wear a zombie skin that a human sees at a glance. The bot cannot see skins, so for players it
--- has line of sight to it reads their inventory (knife in hands or backpack) instead.
 local function playerHasKnife(p)
 local char = p.Character
 if char then
@@ -2811,15 +3105,11 @@ for _, p in ipairs(Players:GetPlayers()) do
                     if knownSheriff ~= p then knownSheriff = p end
                 end
             end
-
-            -- Infection: recognise zombies by inventory, but only the ones we have line of sight to
             if S.gamemode == "Infection" and not S.knifeSeen[p] then
                 if hasLineOfSight(myRootDet.Position + Vector3.new(0, 1.5, 0), pRootDet.Position, pChar) and playerHasKnife(p) then
                     S.knifeSeen[p] = true
                 end
             end
-
-            -- once someone has been seen with a knife this round we keep knowing it, even after they put it away
             if S.knifeSeen[p] then
                 local dd = (pRootDet.Position - myRootDet.Position).Magnitude
                 if not primaryMurdererCandidate or dd < primaryDist then
@@ -2913,7 +3203,6 @@ rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.FilterDescendantsInstances = {char, visFolder, debugFolder}
 
 local direction = moveDir * 4
--- Jump height threshold increased by 2.5 studs (from 2.7 to 5.2 max clearance)
 local lowOrigin = Vector3.new(root.Position.X, feetY + 1.2, root.Position.Z)
 local highOrigin = Vector3.new(root.Position.X, feetY + 5.2, root.Position.Z)
 
@@ -2938,7 +3227,7 @@ return false
 end
 
 local function executeAutoJump(hum, root, isNearEnd)
-if true then return end -- jumping only happens at path jump points now
+if true then return end
 if isNearEnd then return end
 if shouldJump(hum, root) then
 hum:ChangeState(Enum.HumanoidStateType.Jumping)
@@ -3009,8 +3298,150 @@ end
 end
 return false
 end
+do
+    local function horizDist(ax, az, bx, bz)
+        return math.sqrt((ax - bx) ^ 2 + (az - bz) ^ 2)
+    end
 
--- ===== route building: straight-line shortcut, Roblox pathfinding, corner smoothing =====
+    local function doScan()
+        local ladders = {}
+        local small = {}
+        local n = 0
+
+        for _, inst in ipairs(workspace:GetDescendants()) do
+            n = n + 1
+            if n % 1500 == 0 then task.wait() end
+
+            if inst:IsA("TrussPart") then
+                local up = inst.CFrame.UpVector
+                if math.abs(up.Y) > 0.5 and math.max(inst.Size.Y, inst.Size.X, inst.Size.Z) >= 3 then
+                    local c = inst.Position
+                    local half = up * (inst.Size.Y / 2) * (up.Y > 0 and 1 or -1)
+                    table.insert(ladders, {kind = "truss", x = c.X, z = c.Z, base = c - half, top = c + half})
+                end
+            elseif inst:IsA("BasePart") and inst.Transparency < 0.9 and inst.Name ~= "HumanoidRootPart" then
+                local sz = inst.Size
+                local lname = string.lower(inst.Name)
+                if (string.find(lname, "ladder", 1, true) or string.find(lname, "climb", 1, true))
+                    and sz.Y >= 3 and math.max(sz.X, sz.Z) <= 5 then
+                    local c = inst.Position
+                    table.insert(ladders, {kind = "named", x = c.X, z = c.Z, base = c - Vector3.new(0, sz.Y / 2, 0), top = c + Vector3.new(0, sz.Y / 2, 0)})
+                elseif math.max(sz.X, sz.Y, sz.Z) <= 3.5 and math.min(sz.X, sz.Y, sz.Z) <= 0.8 then
+                    local parent = inst.Parent
+                    if not (parent and parent:FindFirstChildOfClass("Humanoid")) then
+                        table.insert(small, inst)
+                    end
+                end
+            end
+        end
+        local cells = {}
+        for _, part in ipairs(small) do
+            local pos = part.Position
+            local key = math.floor(pos.X / 2) .. ":" .. math.floor(pos.Z / 2)
+            local list = cells[key]
+            if not list then
+                list = {}
+                cells[key] = list
+            end
+            table.insert(list, part)
+        end
+
+        local used = setmetatable({}, {__mode = "k"})
+        local visited = 0
+        for _, list in pairs(cells) do
+            visited = visited + 1
+            if visited % 200 == 0 then task.wait() end
+
+            for _, seed in ipairs(list) do
+                if not used[seed] then
+                    local sp = seed.Position
+                    local col = {}
+                    local cx, cz = math.floor(sp.X / 2), math.floor(sp.Z / 2)
+                    for dx = -1, 1 do
+                        for dz = -1, 1 do
+                            local l2 = cells[(cx + dx) .. ":" .. (cz + dz)]
+                            if l2 then
+                                for _, q in ipairs(l2) do
+                                    local qp = q.Position
+                                    if horizDist(qp.X, qp.Z, sp.X, sp.Z) <= 0.8 then
+                                        table.insert(col, q)
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    if #col >= 5 then
+                        table.sort(col, function(a, b) return a.Position.Y < b.Position.Y end)
+                        local chain = {col[1]}
+
+                        local function flush()
+                            if #chain >= 5 then
+                                local lowY = chain[1].Position.Y
+                                local highY = chain[#chain].Position.Y
+                                if highY - lowY >= 5 then
+                                    local sx, sz = 0, 0
+                                    for _, q in ipairs(chain) do
+                                        sx = sx + q.Position.X
+                                        sz = sz + q.Position.Z
+                                        used[q] = true
+                                    end
+                                    sx = sx / #chain
+                                    sz = sz / #chain
+                                    table.insert(ladders, {
+                                        kind = "rungs", x = sx, z = sz, rungs = #chain,
+                                        base = Vector3.new(sx, lowY - 0.5, sz),
+                                        top = Vector3.new(sx, highY + 1, sz),
+                                    })
+                                end
+                            end
+                        end
+
+                        for i = 2, #col do
+                            local gap = col[i].Position.Y - chain[#chain].Position.Y
+                            if gap < 0.25 then
+                            elseif gap >= 0.6 and gap <= 2.6 then
+                                table.insert(chain, col[i])
+                            else
+                                flush()
+                                chain = {col[i]}
+                            end
+                        end
+                        flush()
+                    end
+                end
+            end
+        end
+        table.sort(ladders, function(a, b) return (a.top.Y - a.base.Y) > (b.top.Y - b.base.Y) end)
+        local final = {}
+        for _, L in ipairs(ladders) do
+            local dup = false
+            for _, F in ipairs(final) do
+                if horizDist(L.x, L.z, F.x, F.z) < 1.5 and L.base.Y < F.top.Y and L.top.Y > F.base.Y then
+                    dup = true
+                    break
+                end
+            end
+            if not dup then table.insert(final, L) end
+        end
+
+        local counts = {truss = 0, named = 0, rungs = 0}
+        for _, L in ipairs(final) do counts[L.kind] = counts[L.kind] + 1 end
+        S.ladders = final
+        S.laddersRound = S.roundStartClock
+        addLog(string.format("Ladders found: %d rung stacks, %d truss, %d named", counts.rungs, counts.truss, counts.named), THEME.muted)
+    end
+
+    S.scanLadders = function()
+        if S.ladderScanning then return end
+        S.ladderScanning = true
+        local ok, err = pcall(doScan)
+        S.ladderScanning = false
+        if not ok then
+            addLog("Ladder scan failed: " .. string.sub(tostring(err), 1, 60), THEME.warn)
+        end
+    end
+end
 local agentParams
 local computeRoute
 do
@@ -3027,17 +3458,12 @@ do
     local function newWp(pos)
         return {Position = pos, Action = Enum.PathWaypointAction.Walk}
     end
-
-    -- the ground point under a position
     local function feetPos(pos)
         refreshIgnore()
         local hit = workspace:Raycast(pos + Vector3.new(0, 1, 0), Vector3.new(0, -12, 0), walkParams)
         if hit then return hit.Position end
         return pos - Vector3.new(0, 3, 0)
     end
-
-    -- true when we can just walk a straight line between two ground points: nothing solid at body or knee
-    -- height (swept with our own width) and an even floor all along it
     local function canWalkDirect(a, b)
         local delta = b - a
         local flatLen = Vector3.new(delta.X, 0, delta.Z).Magnitude
@@ -3045,8 +3471,8 @@ do
         if flatLen > 90 or math.abs(delta.Y) > 2.5 then return false end
 
         refreshIgnore()
-        if workspace:Spherecast(a + Vector3.new(0, 2.6, 0), 1.4, delta, walkParams) then return false end
-        if workspace:Spherecast(a + Vector3.new(0, 1.0, 0), 0.8, delta, walkParams) then return false end
+        if workspace:Spherecast(a + Vector3.new(0, 2.6, 0), botSettings.agentRadius + 0.5, delta, walkParams) then return false end
+        if workspace:Spherecast(a + Vector3.new(0, 1.0, 0), 1.0, delta, walkParams) then return false end
 
         local steps = math.ceil(flatLen / 3)
         local prevY = a.Y
@@ -3064,9 +3490,6 @@ do
         local ok, res = pcall(canWalkDirect, a, b)
         return ok and res == true
     end
-
-    -- Drops waypoints we do not need: from each waypoint, jump as far ahead as a straight walk is still clear.
-    -- Jump / special waypoints are never skipped.
     local function smoothWaypoints(wps)
         if #wps <= 2 then return wps end
         local feet = {}
@@ -3079,7 +3502,7 @@ do
         local i = 1
         local work = 0
         while i < #wps do
-            local limit = math.min(#wps, i + 6)
+            local limit = math.min(#wps, i + 4)
             for k = i + 1, limit do
                 if wps[k].Action ~= Enum.PathWaypointAction.Walk then
                     limit = k
@@ -3105,7 +3528,7 @@ do
 
     agentParams = function()
         local radius = botSettings.agentRadius
-        if os.clock() < S.boostUntil then radius = radius + 0.3 end -- a bit more clearance after getting stuck
+        if os.clock() < S.boostUntil then radius = radius + 0.3 end
         return {
             AgentRadius = radius,
             AgentHeight = 5,
@@ -3115,8 +3538,110 @@ do
         }
     end
 
-    -- returns waypoints and a status ("direct" or an Enum.PathStatus), or nil when there is no route
-    computeRoute = function(startPos, goalPos)
+    local function wpLength(wps)
+        local len = 0
+        for i = 2, #wps do
+            len = len + (wps[i].Position - wps[i - 1].Position).Magnitude
+        end
+        return len
+    end
+    local function tryDropRoute(a, b)
+        local maxDrop = botSettings.maxDropHeight
+        if maxDrop <= 0 then return nil end
+        local dy = b.Y - a.Y
+        if dy > -4 or dy < -maxDrop then return nil end
+        local delta = Vector3.new(b.X - a.X, 0, b.Z - a.Z)
+        local flatLen = delta.Magnitude
+        if flatLen < 1 or flatLen > 45 then return nil end
+
+        refreshIgnore()
+        local dir = delta.Unit
+        local edge = nil
+        local steps = math.ceil(flatLen / 2)
+        for i = 1, steps do
+            local p = a + dir * math.min(i * 2, flatLen)
+            local hit = workspace:Raycast(Vector3.new(p.X, a.Y + 3, p.Z), Vector3.new(0, -7, 0), walkParams)
+            if not hit or hit.Position.Y < a.Y - 2.5 then
+                edge = a + dir * math.max((i - 1) * 2, 0)
+                break
+            end
+        end
+        if not edge then return nil end
+        local up = Vector3.new(0, 2.6, 0)
+        if edge ~= a and workspace:Spherecast(a + up, 1.4, edge - a, walkParams) then return nil end
+        local fall = Vector3.new(b.X - edge.X, 0, b.Z - edge.Z)
+        if fall.Magnitude > 0.5 and workspace:Spherecast(edge + up, 1.4, fall, walkParams) then return nil end
+        return {newWp(a), newWp(edge), newWp(b)}
+    end
+
+    local function horizDistXZ(ax, az, bx, bz)
+        return math.sqrt((ax - bx) ^ 2 + (az - bz) ^ 2)
+    end
+    local function groundBeside(L, y, towards)
+        local dirs = {Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1)}
+        local wantX, wantZ = towards.X - L.x, towards.Z - L.z
+        table.sort(dirs, function(a, b) return (a.X * wantX + a.Z * wantZ) > (b.X * wantX + b.Z * wantZ) end)
+        refreshIgnore()
+        for _, d in ipairs(dirs) do
+            local origin = Vector3.new(L.x + d.X * 2.6, y + 3, L.z + d.Z * 2.6)
+            local hit = workspace:Raycast(origin, Vector3.new(0, -8, 0), walkParams)
+            if hit and math.abs(hit.Position.Y - y) < 4 then
+                return hit.Position
+            end
+        end
+        return nil
+    end
+    local function tryLadderRoute(sFeet, gFeet)
+        if not botSettings.useLadders then return nil end
+        if gFeet.Y - sFeet.Y < 5 then return nil end
+
+        if S.laddersRound ~= S.roundStartClock then
+            if S.ladderScanning then return nil end
+            S.scanLadders()
+        end
+        local ladders = S.ladders
+        if not ladders or #ladders == 0 then return nil end
+
+        local now = os.clock()
+        local best, bestCost = nil, math.huge
+        for _, L in ipairs(ladders) do
+            if (S.ladderBlock[L] or 0) < now and L.top.Y > sFeet.Y + 3 and L.base.Y < sFeet.Y + 6
+                and math.abs(L.top.Y - gFeet.Y) <= 7 then
+                local toBase = horizDistXZ(L.x, L.z, sFeet.X, sFeet.Z)
+                local fromTop = horizDistXZ(L.x, L.z, gFeet.X, gFeet.Z)
+                if toBase < 90 and fromTop < 60 then
+                    local cost = toBase + (L.top.Y - L.base.Y) * 1.5 + fromTop
+                    if cost < bestCost then
+                        best = L
+                        bestCost = cost
+                    end
+                end
+            end
+        end
+        if not best then return nil end
+
+        local approach = groundBeside(best, best.base.Y, sFeet)
+        local landing = groundBeside(best, best.top.Y, gFeet)
+        if not approach or not landing then return nil end
+
+        local leg1, st1 = computeRoute(sFeet, approach, true)
+        if not leg1 or not (st1 == "direct" or st1 == Enum.PathStatus.Success) then return nil end
+        local leg2, st2 = computeRoute(landing, gFeet, true)
+        if not leg2 or not (st2 == "direct" or st2 == Enum.PathStatus.Success) then return nil end
+
+        local out = {}
+        for _, w in ipairs(leg1) do table.insert(out, w) end
+        table.insert(out, {Position = Vector3.new(best.x, best.base.Y, best.z), Action = Enum.PathWaypointAction.Walk})
+        table.insert(out, {
+            Position = Vector3.new(best.x, best.top.Y, best.z),
+            Action = Enum.PathWaypointAction.Custom,
+            Climb = true,
+            Ladder = best,
+        })
+        for _, w in ipairs(leg2) do table.insert(out, w) end
+        return out
+    end
+    computeRoute = function(startPos, goalPos, noExtras)
         local t0 = os.clock()
         local sFeet = feetPos(startPos)
         local gFeet = feetPos(goalPos)
@@ -3127,23 +3652,51 @@ do
             return {newWp(sFeet), newWp(gFeet)}, "direct"
         end
 
+        local drop = nil
+        local ladder = nil
+        if not noExtras then
+            local okDrop, dropRes = pcall(tryDropRoute, sFeet, gFeet)
+            if okDrop then drop = dropRes end
+            local okLad, ladRes = pcall(tryLadderRoute, sFeet, gFeet)
+            if okLad then ladder = ladRes end
+        end
+
         local path = PathfindingService:CreatePath(agentParams())
         local ok = pcall(function() path:ComputeAsync(startPos, goalPos) end)
-        if not ok then return nil, nil end
+        local status = ok and path.Status or nil
 
-        local status = path.Status
+        local wps = nil
         if status == Enum.PathStatus.Success or status == Enum.PathStatus.ClosestNoPath then
-            local wps = path:GetWaypoints()
-            if #wps > 0 then
-                local before = #wps
-                if status == Enum.PathStatus.Success and botSettings.smoothPaths then
-                    wps = smoothWaypoints(wps)
-                end
+            wps = path:GetWaypoints()
+            if #wps == 0 then wps = nil end
+        end
+        local before = wps and #wps or 0
+        if wps and status == Enum.PathStatus.Success then
+            wps = smoothWaypoints(wps)
+        end
+        if drop then
+            local straight = (gFeet - sFeet).Magnitude
+            if not wps or status ~= Enum.PathStatus.Success or wpLength(wps) > straight * 1.5 + 6 then
                 if botSettings.pathLog then
-                    addLog(string.format("Route: pathfinding %d -> %d waypoints (%.0f ms)", before, #wps, (os.clock() - t0) * 1000), THEME.muted)
+                    addLog(string.format("Route: drop of %.0f studs (%.0f ms)", sFeet.Y - gFeet.Y, (os.clock() - t0) * 1000), THEME.muted)
                 end
-                return wps, status
+                return drop, "drop"
             end
+        end
+        if ladder then
+            if not wps or status ~= Enum.PathStatus.Success or wpLength(wps) > wpLength(ladder) * 1.5 + 8 then
+                if botSettings.pathLog then
+                    addLog(string.format("Route: ladder (%.0f ms)", (os.clock() - t0) * 1000), THEME.muted)
+                end
+                return ladder, "ladder"
+            end
+        end
+
+        if wps then
+            if botSettings.pathLog then
+                addLog(string.format("Route: pathfinding %d -> %d waypoints (%.0f ms)", before, #wps, (os.clock() - t0) * 1000), THEME.muted)
+            end
+            return wps, status
         end
         return nil, status
     end
@@ -3183,8 +3736,6 @@ if #candidates == 0 and next(unreachableCoins) then
 end
 
 table.sort(candidates, function(a, b) return a.dist < b.dist end)
-
--- a coin right behind a wall is usually a long walk: push those back in the ordering
 local eye = originPos + Vector3.new(0, 1.5, 0)
 for i = 1, math.min(#candidates, 8) do
     local c = candidates[i]
@@ -3193,8 +3744,6 @@ for i = 1, math.min(#candidates, 8) do
     end
 end
 table.sort(candidates, function(a, b) return a.dist < b.dist end)
-
--- the (more expensive) "is someone standing on it" check only runs on the coins we may actually pick
 local result = {}
 for _, c in ipairs(candidates) do
     if #result >= count then break end
@@ -3204,9 +3753,6 @@ for _, c in ipairs(candidates) do
 end
 return result
 end
-
--- Computes the real walking paths to the first k coins of the pool at the same time and returns the one
--- with the shortest path. A coin that looks close can be far away on foot (other side of a wall).
 local function pickCoinByPath(startPos, pool, k)
 local results = {}
 local pendingJobs = 0
@@ -3220,7 +3766,7 @@ for i = 1, limit do
         task.spawn(function()
             local goal = groundBelow(cPos)
             local wps, status = computeRoute(startPos, goal)
-            if wps and (status == "direct" or status == Enum.PathStatus.Success) then
+            if wps and (status == "direct" or status == "drop" or status == "ladder" or status == Enum.PathStatus.Success) then
                 results[i] = {coin = coin, wps = wps, len = pathLength(wps), pos = cPos}
             end
             pendingJobs = pendingJobs - 1
@@ -3242,8 +3788,6 @@ for i = 1, limit do
 end
 return best
 end
-
--- A coin showed up close to us. If it is clearly nearer than the coin we are walking to (and not behind a wall), go for it.
 local function checkOpportunisticCoins(root)
 if not botSettings.grabNearby then return end
 if isTargetingGun or isCalculatingPath then return end
@@ -3286,9 +3830,6 @@ if bestDist + 3 < currentDist then
     buildRouteAsync()
 end
 end
-
--- Builds a route. While we already have a route to a coin, this plans the NEXT leg from that coin's
--- position so it is ready the moment the coin is picked up (no stop-and-think between coins).
 buildRouteAsync = function()
 if isCalculatingPath then return end
 local _, root = getCharacter()
@@ -3372,14 +3913,11 @@ task.spawn(function()
         local goalPos = groundBelow(chosenPos)
         waypoints = computeRoute(startPos, goalPos)
     end
-
-    -- things may have changed while the paths were computing
     if planningAhead and (route == nil or targetCoin ~= planTarget) then
         isCalculatingPath = false
         return
     end
     if not planningAhead and route ~= nil and targetCoin ~= nil and targetCoin.Parent ~= nil and not isTargetingGun then
-        -- a route appeared in the meantime; keep it
         isCalculatingPath = false
         return
     end
@@ -3572,9 +4110,6 @@ setFirstPersonCamera()
 local camPos = camera.CFrame.Position
 local aimCFrame = CFrame.lookAt(camPos, targetPos)
 camera.CFrame = aimCFrame
-
--- Off-tab / unfocused window mouse orientation fix:
--- Forces the local mouse cursor world unit projection directly toward target position
 pcall(function()
     local screenPoint, onScreen = camera:WorldToViewportPoint(targetPos)
     if onScreen then
@@ -3584,8 +4119,6 @@ end)
 
 
 end
-
--- Pathfinding Wandering Logic
 local function computeWanderPath(hum, root)
 if isCalculatingWander then return end
 isCalculatingWander = true
@@ -3656,12 +4189,8 @@ return false
 
 
 end
-
--- Anti-fling, seat stand-up and cheater detector
 do
 local PURPLE = Color3.fromRGB(170, 90, 255)
-
--- Anti-fling: other players' bodies stop colliding with us (client side only), and a violent shove is cancelled.
 local antiFlingConn = RunService.Stepped:Connect(function()
     if not botSettings.antiFling then return end
 
@@ -3689,14 +4218,6 @@ local antiFlingConn = RunService.Stepped:Connect(function()
     end
 end)
 table.insert(S.uiConns, antiFlingConn)
-
--- Cheater detector: watches how other players move. It only marks them (purple ESP + a log line);
--- the bot's own decisions never use it, except that the murderer does not hunt marked players.
---
--- S.cheaterInfo keeps the history (how many rounds someone was flagged). S.cheaters is the set that is shown as
--- purple right now: anyone flagged this round, plus anyone flagged in 2+ rounds. A one-off flag disappears when
--- the next round starts, and the count drops by one for every round a player is NOT flagged, so rare false
--- flags cannot pile up over hours.
 local records = setmetatable({}, {__mode = "k"})
 
 local rayParams = RaycastParams.new()
@@ -3706,9 +4227,6 @@ rayParams.RespectCanCollide = true
 local overlapParams = OverlapParams.new()
 overlapParams.FilterType = Enum.RaycastFilterType.Exclude
 overlapParams.RespectCanCollide = true
-
--- Auto report (off by default). Guardrails: only after the player was flagged in several different rounds,
--- never friends, once per player, at most 10 per session and 20 seconds apart.
 local function maybeReport(p, info)
     if not botSettings.autoReport or info.reported then return end
     if info.rounds < botSettings.reportRounds then return end
@@ -3731,27 +4249,17 @@ local function maybeReport(p, info)
     end
 end
 
-local function revokeRound()
-    for uid, info in pairs(S.cheaterInfo) do
-        if info.round == S.roundStartClock then
-            info.rounds = info.rounds - 1
-            info.round = nil
-            if info.rounds <= 0 then
-                S.cheaterInfo[uid] = nil
-                S.cheaters[uid] = nil
-            elseif info.rounds >= 2 then
-                S.cheaters[uid] = info
-            else
-                S.cheaters[uid] = nil
-            end
-        end
-    end
+S.manualReport = function(p, info)
+    local old = botSettings.autoReport
+    botSettings.autoReport = true
+    info.rounds = math.max(info.rounds or 0, botSettings.reportRounds)
+    maybeReport(p, info)
+    botSettings.autoReport = old
 end
 
 local function flag(p, reason)
-    if S.flagSuppressed == S.roundStartClock then return end
     local info = S.cheaterInfo[p.UserId]
-    if info and info.round == S.roundStartClock then return end -- already flagged this round
+    if info and info.round == S.roundStartClock then return end
 
     if info then
         info.rounds = info.rounds + 1
@@ -3765,24 +4273,28 @@ local function flag(p, reason)
     end
     S.cheaters[p.UserId] = info
 
-    -- Real cheaters are rare. If many players get flagged in the same round the detector is wrong, not them.
-    local flaggedNow = 0
-    for _, i in pairs(S.cheaterInfo) do
-        if i.round == S.roundStartClock then flaggedNow = flaggedNow + 1 end
+    if botSettings.cheaterNotify then
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", {
+                Title = "Possible cheater",
+                Text = p.Name .. " (" .. reason .. ")",
+                Duration = 6,
+            })
+        end)
     end
-    local others = math.max(1, #Players:GetPlayers() - 1)
-    if flaggedNow > math.max(2, math.ceil(others * 0.25)) then
-        revokeRound()
-        S.flagSuppressed = S.roundStartClock
-        addLog("Detector flagged " .. flaggedNow .. " players at once. Ignoring this round (false positives).", THEME.warn)
-        return
+
+    if S.discordSend then
+        S.discordSend("cheater", "Possible cheater", {
+            {name = "Player", value = p.Name},
+            {name = "Reason", value = reason},
+            {name = "Rounds flagged", value = tostring(info.rounds)},
+        }, 10038562)
     end
 
     maybeReport(p, info)
 end
-
--- a new round started: age the history
 local function onNewRound(prevRound)
+    S.ragebaitChecked = false
     for uid, info in pairs(S.cheaterInfo) do
         if info.round ~= prevRound then
             info.rounds = info.rounds - 1
@@ -3818,8 +4330,6 @@ local function analyse(p, now)
     local delta = root.Position - rec.pos
     rec.pos = root.Position
     rec.t = now
-
-    -- a huge jump in one sample is the game moving them (map teleport): start over and wait a while
     local horizontal = Vector3.new(delta.X, 0, delta.Z).Magnitude
     if horizontal > 60 then
         rec.hist = {}
@@ -3832,16 +4342,13 @@ local function analyse(p, now)
     if now - rec.born < 8 then return end
 
     local vy = delta.Y / dt
-    local spinning = root.AssemblyAngularVelocity.Magnitude > 15 -- tumbling = being flung, not flying
+    local spinning = root.AssemblyAngularVelocity.Magnitude > 15
 
     local state = nil
     pcall(function() state = hum:GetState() end)
     local exempt = state == Enum.HumanoidStateType.Climbing
         or state == Enum.HumanoidStateType.Swimming
         or state == Enum.HumanoidStateType.Seated
-
-    -- Speed: net distance over the last second, so a lag spike (stand still, then catch up) averages out.
-    -- It has to stay above the threshold for about 1.6 seconds. Small speed boosts stay below it.
     table.insert(rec.hist, {t = now, pos = root.Position})
     while #rec.hist > 1 and now - rec.hist[1].t > 1.2 do
         table.remove(rec.hist, 1)
@@ -3860,8 +4367,6 @@ local function analyse(p, now)
             return
         end
     end
-
-    -- Flying: well above the ground and not falling, for much longer than any jump lasts
     local ground = workspace:Raycast(root.Position, Vector3.new(0, -60, 0), rayParams)
     local groundDist = ground and (root.Position.Y - ground.Position.Y) or math.huge
     if groundDist > 12 and vy > -15 and not exempt and not spinning then
@@ -3873,16 +4378,21 @@ local function analyse(p, now)
         flag(p, string.format("flying, %.0f studs up", math.min(groundDist, 999)))
         return
     end
-
-    -- Noclip: the middle of their body sits inside solid geometry
     local inside = false
     local insidePart = nil
     if not exempt then
         for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, 0.6, overlapParams)) do
             if not part:IsA("Terrain") and not isCoin(part) and part.Name ~= "GunDrop" and part.Size.Magnitude > 2 then
-                inside = true
-                insidePart = part
-                break
+                local ok, localPos = pcall(function() return part.CFrame:PointToObjectSpace(root.Position) end)
+                local half = part.Size * 0.5
+                local penetrated = ok and math.abs(localPos.X) < half.X - 0.15
+                    and math.abs(localPos.Y) < half.Y - 0.15
+                    and math.abs(localPos.Z) < half.Z - 0.15
+                if penetrated then
+                    inside = true
+                    insidePart = part
+                    break
+                end
             end
         end
     end
@@ -3891,7 +4401,7 @@ local function analyse(p, now)
     else
         rec.inside = math.max(0, rec.inside - dt)
     end
-    if rec.inside > botSettings.cheaterLeniency then
+    if rec.inside > math.max(2.5, botSettings.cheaterLeniency * 1.5) then
         flag(p, "noclip, inside " .. (insidePart and insidePart.Name or "geometry"))
     end
 end
@@ -3904,6 +4414,7 @@ task.spawn(function()
         if S.roundStartClock ~= lastRoundId then
             onNewRound(lastRoundId)
             lastRoundId = S.roundStartClock
+            task.delay(5, function() if S.scanLadders then S.scanLadders() end end)
         end
 
         if botSettings.cheaterDetect and isRoundActive() and os.clock() - S.roundStartClock > 10 then
@@ -3927,10 +4438,398 @@ task.spawn(function()
     end
 end)
 end
+do
+local STUCK_FILE = dataFolder .. "/stuck_log.csv"
+local startClock = os.clock()
+
+local function clean(v)
+    return (tostring(v):gsub("[,\r\n]", " "))
+end
+
+local function currentMapName()
+    local ok, name = pcall(function()
+        local c = getCoinContainer()
+        local par = c and c.Parent
+        if par and par ~= workspace then return par.Name end
+        return "Unknown"
+    end)
+    return clean(ok and name or "Unknown")
+end
+S.currentMapName = currentMapName
+local lines = {}
+local agg = {}
+local dirty = false
+
+local function addToAgg(map, event, obj, class, size, x, y, z)
+    local key = map .. "|" .. event .. "|" .. obj .. "|" .. class .. "|" .. size
+    local a = agg[key]
+    if not a then
+        a = {count = 0, map = map, event = event, obj = obj, class = class, size = size, x = x, y = y, z = z}
+        agg[key] = a
+    end
+    a.count = a.count + 1
+end
+if isfile and readfile and isfile(STUCK_FILE) then
+    local ok, text = pcall(readfile, STUCK_FILE)
+    if ok and type(text) == "string" then
+        for line in string.gmatch(text, "[^\r\n]+") do
+            if string.sub(line, 1, 4) ~= "time" then
+                table.insert(lines, line)
+                local f = {}
+                for field in string.gmatch(line .. ",", "([^,]*),") do
+                    table.insert(f, field)
+                end
+                if #f >= 9 then
+                    addToAgg(f[2], f[3], f[7], f[8], f[9], tonumber(f[4]) or 0, tonumber(f[5]) or 0, tonumber(f[6]) or 0)
+                end
+            end
+        end
+    end
+end
+if #lines > 3000 then
+    local keep = {}
+    for i = #lines - 2999, #lines do keep[#keep + 1] = lines[i] end
+    lines = keep
+end
+
+S.recordStuck = function(event, root, detail, inst)
+    if not botSettings.stuckLog then return end
+    local pos = root and root.Position or Vector3.new(0, 0, 0)
+    local obj, class, size = "", "", ""
+    if inst then
+        obj = clean(inst.Name)
+        class = clean(inst.ClassName)
+        local ok, sz = pcall(function() return inst.Size end)
+        if ok and sz then size = string.format("%.1fx%.1fx%.1f", sz.X, sz.Y, sz.Z) end
+    end
+    local map = currentMapName()
+    local x, y, z = math.floor(pos.X + 0.5), math.floor(pos.Y + 0.5), math.floor(pos.Z + 0.5)
+    table.insert(lines, table.concat({os.date("%Y-%m-%d %H:%M:%S"), map, clean(event), x, y, z, obj, class, size, clean(detail or "")}, ","))
+    if #lines > 3000 then table.remove(lines, 1) end
+    dirty = true
+    addToAgg(map, clean(event), obj, class, size, tonumber(x) or 0, tonumber(y) or 0, tonumber(z) or 0)
+    S.stuckCount = (tonumber(S.stuckCount) or 0) + 1
+end
+
+S.flushStuck = function()
+    if not dirty or not writefile then return end
+    dirty = false
+    local out = {"time,map,event,x,y,z,object,class,size,detail"}
+    for _, l in ipairs(lines) do out[#out + 1] = l end
+    pcall(writefile, STUCK_FILE, table.concat(out, "\n"))
+end
+
+S.stuckSummary = function()
+    local rows = {}
+    for _, a in pairs(agg) do rows[#rows + 1] = a end
+    table.sort(rows, function(p, q) return p.count > q.count end)
+    local out = {"Stuck spots, most frequent first (" .. #rows .. " distinct)"}
+    for i = 1, math.min(#rows, 25) do
+        local a = rows[i]
+        out[#out + 1] = string.format("%dx  [%s] %s: %s (%s, %s) near %.0f, %.0f, %.0f",
+            a.count, a.map, a.event, a.obj ~= "" and a.obj or "?", a.class ~= "" and a.class or "?",
+            a.size ~= "" and a.size or "?", a.x or 0, a.y or 0, a.z or 0)
+    end
+    if #rows == 0 then out[#out + 1] = "nothing recorded yet" end
+    return table.concat(out, "\n")
+end
+
+task.spawn(function()
+    while not S.unloaded do
+        task.wait(45)
+        S.flushStuck()
+    end
+end)
+local function requestFn()
+    if typeof(request) == "function" then return request end
+    if typeof(http_request) == "function" then return http_request end
+    if typeof(syn) == "table" and typeof(syn.request) == "function" then return syn.request end
+    return nil
+end
+
+S.checkLicense = function()
+    local key = tostring(botSettings.licenseKey or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if key == "" then addLog("Enter a key first", THEME.warn); return end
+    if key:lower() == "bypass" then
+        botSettings.licenseState = "valid"
+        botSettings.licenseExpiresAt = (os.time() + 315360000) * 1000
+        botSettings.skipKeySystem = false
+        saveKeyFile("bypass")
+        saveSettings()
+        if S.keyStatusLabel then
+            S.keyStatusLabel.Text = "Permanent bypass accepted. Unlocking..."
+            S.keyStatusLabel.TextColor3 = THEME.good
+        end
+        if S.onLicenseValid then S.onLicenseValid() end
+        return
+    end
+    local req = requestFn()
+    if not req then addLog("No HTTP request function available", THEME.warn); return end
+    task.spawn(function()
+        local ok, res = pcall(req, {Url = "https://work.ink/_api/v2/token/isValid/" .. key, Method = "GET"})
+        local valid = false
+        local expires = 0
+        if ok and type(res) == "table" and type(res.Body) == "string" then
+            local parsed = pcall(function()
+                local data = HttpService:JSONDecode(res.Body)
+                valid = data.valid == true
+                expires = tonumber(data.info and data.info.expiresAfter) or 0
+            end)
+        end
+        if valid then
+            botSettings.licenseState = "valid"
+            botSettings.licenseExpiresAt = expires
+            botSettings.skipKeySystem = false
+            saveKeyFile(key)
+            saveSettings()
+            addLog("Key valid; no IP check was performed.", THEME.good)
+            if S.keyStatusLabel then
+                S.keyStatusLabel.Text = "Key redeemed successfully. Unlocking..."
+                S.keyStatusLabel.TextColor3 = THEME.good
+            end
+            if S.onLicenseValid then S.onLicenseValid() end
+        else
+            botSettings.licenseState = "invalid"
+            saveSettings()
+            addLog(ok and "Key check failed: invalid or expired key." or "Key check failed: request error.", THEME.warn)
+            if S.keyStatusLabel then
+                S.keyStatusLabel.Text = ok and "Check failed: invalid or expired key." or "Check failed: request error."
+                S.keyStatusLabel.TextColor3 = THEME.warn
+            end
+        end
+    end)
+end
+
+local queue = {}
+local lastKind = {}
+local lastErrLog = 0
+local toggles = {cheater = "discordCheater", watchdog = "discordWatchdog", hop = "discordHop", status = "discordStatus"}
+
+local function enqueue(title, fields, color)
+    if #queue >= 40 then table.remove(queue, 1) end
+    table.insert(queue, {title = title, fields = fields or {}, color = color or 7110911})
+end
+
+S.discordSend = function(kind, title, fields, color)
+    if not botSettings.discordEnabled or not S.isDiscordUrl(botSettings.discordUrl) then return false end
+    local key = toggles[kind]
+    if key and not botSettings[key] then return false end
+    if kind == "hop" and os.clock() - (lastKind.hop or -1e9) < 60 then return false end
+    if botSettings.skipKeySystem and botSettings.licenseState ~= "valid" then
+        title = "⚠️ NO KEY: " .. title
+        fields = fields or {}
+        table.insert(fields, 1, {name = "Key status", value = "⚠️ Key system skipped; this user has no redeemed key."})
+    end
+    lastKind[kind] = os.clock()
+    enqueue(title, fields, color)
+    return true
+end
+
+S.discordTest = function()
+    if not S.isDiscordUrl(botSettings.discordUrl) then
+        addLog("Discord: set a valid webhook URL first", THEME.warn)
+        return
+    end
+    enqueue("Test message", {{name = "From", value = "MM2 Autoplay " .. VERSION}}, 6342266)
+    addLog("Discord: test message queued", THEME.muted)
+end
+
+task.spawn(function()
+    while not S.unloaded do
+        task.wait(2.5)
+        local item = queue[1]
+        if item then
+            local req = requestFn()
+            if not req or not S.isDiscordUrl(botSettings.discordUrl) then
+                queue = {}
+                if os.clock() - lastErrLog > 30 then
+                    lastErrLog = os.clock()
+                    addLog("Discord: no request function or no valid webhook, messages dropped", THEME.warn)
+                end
+            else
+                local fields = {}
+                for _, f in ipairs(item.fields) do
+                    local value = tostring(f.value)
+                    if value == "" then value = "-" end
+                    table.insert(fields, {name = string.sub(tostring(f.name), 1, 250), value = string.sub(value, 1, 1000), inline = f.inline ~= false})
+                end
+                local payload = {
+                    username = "MM2 Autoplay",
+                    content = (botSettings.skipKeySystem and botSettings.licenseState ~= "valid")
+                        and "⚠️⚠️ WARNING: This user skipped the key system. ⚠️⚠️" or nil,
+                    embeds = {{
+                        title = string.sub(item.title, 1, 250),
+                        color = item.color,
+                        fields = fields,
+                        footer = {text = player.Name .. " | server " .. string.sub(game.JobId, 1, 8)},
+                        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                    }},
+                }
+                local ok, res = pcall(req, {
+                    Url = botSettings.discordUrl,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = "application/json"},
+                    Body = HttpService:JSONEncode(payload),
+                })
+                local status = ok and type(res) == "table" and res.StatusCode or nil
+                if status and status >= 200 and status < 300 then
+                    table.remove(queue, 1)
+                elseif status == 429 then
+                    local headers = res.Headers or {}
+                    local retry = tonumber(headers["retry-after"] or headers["Retry-After"]) or 5
+                    task.wait(math.clamp(retry, 1, 60))
+                else
+                    table.remove(queue, 1)
+                    if os.clock() - lastErrLog > 30 then
+                        lastErrLog = os.clock()
+                        addLog("Discord: send failed (" .. tostring(status or "no response") .. ")", THEME.warn)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local function queueDiscordStatus()
+    local up = os.clock() - startClock
+    local flagged = 0
+    for _ in pairs(S.cheaters) do flagged = flagged + 1 end
+    local coins = "?"
+    pcall(function()
+        local stats = player:FindFirstChild("leaderstats")
+        local c = stats and (stats:FindFirstChild("Coins") or stats:FindFirstChild("Coin"))
+        if c and c.Value ~= nil then coins = tostring(c.Value) end
+    end)
+    local hours = math.max(up / 3600, 1 / 3600)
+    local ok = S.discordSend("status", "Status", {
+        {name = "Uptime", value = string.format("%dh %02dm", math.floor(up / 3600), math.floor(up / 60) % 60)},
+        {name = "Coins", value = coins},
+        {name = "Coins/hour", value = coins ~= "?" and string.format("%.0f", (tonumber(coins) or 0) / hours) or "?"},
+        {name = "Cheaters marked", value = tostring(flagged)},
+        {name = "Stuck events", value = tostring(tonumber(S.stuckCount) or 0)},
+        {name = "Watchdog actions", value = tostring(S.wdResets)},
+        {name = "Server hops", value = tostring(S.hopCount)},
+        {name = "Reports sent", value = tostring(S.reportsSent)},
+    }, 5763719)
+    addLog(ok and "Discord status queued" or "Discord status not sent (check webhook/status toggle)", ok and THEME.good or THEME.warn)
+end
+S.sendStatusNow = queueDiscordStatus
+task.spawn(function()
+    local last = os.clock()
+    while not S.unloaded do
+        task.wait(30)
+        if botSettings.discordEnabled and botSettings.discordStatus and os.clock() - last >= botSettings.discordStatusMinutes * 60 then
+            last = os.clock()
+            local up = os.clock() - startClock
+            local flagged = 0
+            for _ in pairs(S.cheaters) do flagged = flagged + 1 end
+            local coins = "?"
+            pcall(function()
+                local stats = player:FindFirstChild("leaderstats")
+                local c = stats and (stats:FindFirstChild("Coins") or stats:FindFirstChild("Coin"))
+                if c and c.Value ~= nil then coins = tostring(c.Value) end
+            end)
+            local hours = math.max(up / 3600, 1 / 3600)
+            S.discordSend("status", "Status", {
+                {name = "Uptime", value = string.format("%dh %02dm", math.floor(up / 3600), math.floor(up / 60) % 60)},
+                {name = "Coins", value = coins},
+                {name = "Coins/hour", value = coins ~= "?" and string.format("%.0f", (tonumber(coins) or 0) / hours) or "?"},
+                {name = "Cheaters marked", value = tostring(flagged)},
+                {name = "Stuck events", value = tostring(tonumber(S.stuckCount) or 0)},
+                {name = "Watchdog actions", value = tostring(S.wdResets)},
+                {name = "Server hops", value = tostring(S.hopCount)},
+                {name = "Reports sent", value = tostring(S.reportsSent)},
+            }, 5763719)
+        end
+    end
+end)
+task.delay(12, function()
+    S.discordSend("hop", "Bot started", {
+        {name = "Players", value = #Players:GetPlayers() .. "/12"},
+        {name = "Map", value = currentMapName()},
+        {name = "Version", value = VERSION},
+    }, 5763719)
+end)
+end
+do
+local anchorPos = nil
+local anchorT = os.clock()
+local stage = 0
+local noCharSince = nil
+
+local function escalate(reason)
+    stage = stage + 1
+    S.wdResets = S.wdResets + 1
+    local ch = player.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    local action
+    if stage == 1 and hum then
+        action = "reset character"
+        hum.Health = 0
+    elseif stage <= 2 then
+        action = "server hop"
+        performServerHop()
+    else
+        action = "rejoin"
+        pcall(function() TeleportService:Teleport(game.PlaceId, player) end)
+    end
+    addLog("Watchdog: " .. reason .. ", action: " .. action, THEME.warn)
+    if S.recordStuck then
+        S.recordStuck("softlock", ch and ch:FindFirstChild("HumanoidRootPart"), reason .. " -> " .. action, nil)
+    end
+    if S.discordSend then
+        S.discordSend("watchdog", "Softlock suspected", {
+            {name = "Reason", value = reason},
+            {name = "Action", value = action},
+            {name = "Map", value = S.currentMapName()},
+        }, 15548997)
+    end
+    anchorT = os.clock()
+    anchorPos = nil
+end
+
+task.spawn(function()
+    while not S.unloaded do
+        task.wait(5)
+        if not botSettings.watchdog or not botSettings.botEnabled or not enabled then
+            anchorPos = nil
+            anchorT = os.clock()
+            stage = 0
+            noCharSince = nil
+            continue
+        end
+
+        local now = os.clock()
+        local limit = botSettings.watchdogMinutes * 60
+        local ch = player.Character
+        local root = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not root then
+            noCharSince = noCharSince or now
+            if now - noCharSince > limit then
+                escalate("no character for " .. botSettings.watchdogMinutes .. " minutes")
+                noCharSince = now
+            end
+            continue
+        end
+        noCharSince = nil
+
+        if isRoundActive() and now - S.wdExempt > 8 then
+            if not anchorPos or (root.Position - anchorPos).Magnitude > 10 then
+                anchorPos = root.Position
+                anchorT = now
+                stage = 0
+            elseif now - anchorT > limit then
+                escalate("no movement for " .. botSettings.watchdogMinutes .. " minutes")
+            end
+        else
+            anchorPos = nil
+            anchorT = now
+        end
+    end
+end)
+end
 
 local function reachJump(hum, root, targetPos, isGun)
--- Jump for targets above us (elevated coins, the dropped gun which is usually in the air).
--- executeAutoJump deliberately skips the last waypoints, so the final approach is handled here.
 if os.clock() - lastJumpTime < 0.7 then return end
 local flat = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z).Magnitude
 local dy = targetPos.Y - root.Position.Y
@@ -3951,7 +4850,6 @@ end
 
 local coin = pendingTargetCoin
 if not coin.Parent or unreachableCoins[coin] or isBlacklisted(coin) or isCoinClaimedByOthers(coin) then
-    -- the planned coin is gone (someone took it); throw the plan away and re-plan from where we are
     pendingRoute = nil
     pendingTargetCoin = nil
     pendingUpcomingCoins = {}
@@ -3969,9 +4867,6 @@ pendingTargetCoin = nil
 pendingUpcomingCoins = {}
 drawRoute(route)
 updateCoinMarkers()
-
--- The first waypoint of the next leg is the coin we are standing on. Skip the waypoints we are already at and
--- start moving right away, otherwise the humanoid stops for a few frames after every coin.
 local humNow, rootNow = getCharacter()
 if humNow and rootNow then
     while routeIndex < #route do
@@ -4033,6 +4928,17 @@ end
 return S.bagFull
 end
 
+local function skippedKeyResetEnabled()
+    if not botSettings.skipKeySystem or botSettings.licenseState == "valid" then return false end
+    if S.gamemode == "Infection" then
+        return myRole == "Murderer" and botSettings.zombieResetLastTwo
+            or myRole ~= "Murderer" and botSettings.survivorResetLastTwo
+    end
+    if myRole == "Murderer" then return botSettings.murdererResetLastTwo end
+    if myRole == "Sheriff" then return botSettings.sheriffResetLastTwo end
+    return botSettings.innocentResetLastTwo
+end
+
 local function doReset(hum, reason)
 addLog("Resetting character (" .. reason .. ")", THEME.warn)
 pcall(function()
@@ -4064,12 +4970,20 @@ if route or chaseRoute or wanderRoute or targetCoin then
     wanderRoute = nil
 end
 statusLbl.Text = "State: Standing (bag full)"
+S.wdExempt = os.clock()
 hum:MoveTo(root.Position)
 end
 
 local function runWanderStep(hum, root)
+if lastWanderChange == 0 then lastWanderChange = os.clock() end
+if wanderRoute and os.clock() - lastWanderChange > 12 then
+    wanderRoute = nil
+    wanderRouteIndex = 1
+    lastWanderChange = os.clock()
+end
 if (not wanderRoute or wanderRouteIndex > #wanderRoute) and not isCalculatingWander then
     computeWanderPath(hum, root)
+    lastWanderChange = os.clock()
 end
 if wanderRoute and wanderRouteIndex <= #wanderRoute then
     local wp = wanderRoute[wanderRouteIndex]
@@ -4083,10 +4997,6 @@ if wanderRoute and wanderRouteIndex <= #wanderRoute then
     end
 end
 end
-
--- Sheriff: aim and shoot at a murderer the bot can actually see.
--- The bot locks on for aimDelay seconds before every shot instead of firing instantly.
--- Returns true when it also took over movement this frame.
 local function sheriffCombat(hum, root, allowMove)
 local shootOn = botSettings.sheriffShoot
 if S.gamemode == "Infection" then shootOn = botSettings.survivorShoot end
@@ -4147,12 +5057,6 @@ elseif distToM <= 45 and visible then
 end
 return false
 end
-
--- Murderer / zombie: pick a victim we can actually see (or saw a moment ago), chase and attack.
---  * players behind walls or on other floors that we cannot see are not tracked
---  * distance for choosing a target counts height heavily, so someone one floor up is not "close"
---  * we only attack when the target is visible and on our level
--- Returns true when the frame was handled.
 local function runMurdererHunt(hum, root, dt, maxRange, trackAll)
 local now = os.clock()
 local eye = root.Position + Vector3.new(0, 1.5, 0)
@@ -4182,7 +5086,6 @@ for _, p in ipairs(Players:GetPlayers()) do
                 seenPos = pos
                 S.huntSeen[p] = {pos = pos, t = now}
             elseif trackAll then
-                -- original full hunt: always knows where every player is
                 seenPos = pos
             else
                 local mem = S.huntSeen[p]
@@ -4210,12 +5113,8 @@ for _, p in ipairs(Players:GetPlayers()) do
 end
 
 if not murderTarget or not murderTarget.Character or not bestPos then
-    -- nobody in sight: do not wander around aimlessly. Returning false lets the normal coin routine run,
-    -- which keeps us moving through the map where the other players go.
     return false
 end
-
--- give up on a victim we cannot get any closer to, and pick someone else
 if S.huntTarget ~= murderTarget then
     S.huntTarget = murderTarget
     S.huntBest = bestRaw
@@ -4297,8 +5196,6 @@ if os.clock() - S.lastEsp >= 0.25 then
     S.lastEsp = os.clock()
     updatePlayerESP()
 end
-
--- put weapons away when we are not using them, a drawn knife or gun gives us away
 if os.clock() - S.lastCombatT > 1.5 and os.clock() - S.lastHolster > 0.5 then
     S.lastHolster = os.clock()
     local ch = player.Character
@@ -4424,14 +5321,33 @@ else
         mapVoteStatusLbl.TextColor3 = THEME.accent
     end
 end
-
--- Role play styles, bag-full actions and combat
 local playMode, bagAction, standRun = getRolePlan()
 local bagFull = updateBagState()
 local settled = (os.clock() - S.roundStartClock) >= S.settleTime
 local action = nil
+if activeRound and bagFull and settled and skippedKeyResetEnabled() and not S.ragebaitChecked then
+    S.ragebaitChecked = true
+    if math.random() < 0.25 then
+        action = "Reset"
+        addLog("No-key 49-coin reset triggered (25% chance).", THEME.warn)
+    end
+end
 if activeRound and bagFull and settled then
-    action = bagAction
+    action = action or bagAction
+    local resetLastTwo = (myRole == "Murderer" and S.gamemode ~= "Infection" and botSettings.murdererResetLastTwo)
+        or (myRole == "Sheriff" and S.gamemode ~= "Infection" and botSettings.sheriffResetLastTwo)
+        or (myRole == "Innocent" and S.gamemode ~= "Infection" and botSettings.innocentResetLastTwo)
+        or (myRole == "Murderer" and S.gamemode == "Infection" and botSettings.zombieResetLastTwo)
+        or (myRole ~= "Murderer" and S.gamemode == "Infection" and botSettings.survivorResetLastTwo)
+    if resetLastTwo then
+        local aliveCount = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            local c = p.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            if p:GetAttribute("Alive") == true and h and h.Health > 0 then aliveCount = aliveCount + 1 end
+        end
+        action = aliveCount <= 2 and "Reset" or "Stand"
+    end
 end
 
 if activeRound then
@@ -4505,8 +5421,6 @@ doStuckCheck(hum, root, dt)
 if handleWanderingSearch(hum, root) then
     return
 end
-
--- Watchdog: if we have not gotten any closer to the target for giveUpTime seconds, drop it and pick another
 if route and targetCoin and targetCoin.Parent then
     local tPos = availablePosition(targetCoin)
     if tPos then
@@ -4519,6 +5433,7 @@ if route and targetCoin and targetCoin.Parent then
             S.watchBest = d
             S.watchProgressT = os.clock()
         elseif os.clock() - S.watchProgressT > botSettings.giveUpTime then
+            if S.recordStuck then S.recordStuck("gave-up", root, isTargetingGun and "gun" or "coin", nil) end
             addLog((isTargetingGun and "Gave up on the gun" or "Gave up on a coin") .. " (not getting closer)", THEME.warn)
             blacklistInstance(targetCoin, 90)
             S.watchTarget = nil
@@ -4534,7 +5449,6 @@ end
 if not route or not targetCoin or not targetCoin.Parent or isCoinClaimedByOthers(targetCoin) then
     statusLbl.Text = isTargetingGun and "State: Retrieving Gun" or "State: Collecting Coins"
     if route then
-        -- our target vanished (picked up or taken): continue straight to the planned coin if there is one
         if not promotePendingRoute() then
             clearRoute()
         end
@@ -4544,7 +5458,6 @@ if not route or not targetCoin or not targetCoin.Parent or isCoinClaimedByOthers
     end
 
     if not route then
-        -- keep walking toward the nearest coin while the next route is computed, never stand still
         if os.clock() - S.hintT > 0.25 then
             S.hintT = os.clock()
             if not S.hintCoin or not S.hintCoin.Parent then
@@ -4568,8 +5481,6 @@ else
     if coinPos and (routeIndex >= #route - 1 or routeIndex > #route) then
         local distToCoinCenter = Vector3.new(root.Position.X - coinPos.X, 0, root.Position.Z - coinPos.Z).Magnitude
         local dy = coinPos.Y - root.Position.Y
-
-        -- the next leg is ready and we are on top of this coin: roll straight into it instead of stopping here
         if pendingRoute and not isTargetingGun and distToCoinCenter < 2.2 and math.abs(dy) < 3 then
             local oldTarget = targetCoin
             if promotePendingRoute() then
@@ -4580,8 +5491,6 @@ else
 
         moveAlongWaypoint(hum, root, {coinPos}, 1)
         reachJump(hum, root, coinPos, isTargetingGun)
-
-        -- horizontally close is not enough: the target also has to be at a reachable height
         local arrived
         if isTargetingGun then
             arrived = not targetCoin.Parent
@@ -4609,9 +5518,6 @@ else
             local wp = route[routeIndex]
             local wpPos = typeof(wp) == "Vector3" and wp or wp.Position
             local flatDist = Vector3.new(root.Position.X - wpPos.X, 0, root.Position.Z - wpPos.Z).Magnitude
-
-            -- No progress toward this waypoint for a while (stuck on a box, in a door frame...): plan again with a
-            -- little more clearance. Twice on the same coin and it is skipped for a while.
             local dWp = (wpPos - root.Position).Magnitude
             if S.wpRoute ~= route or S.wpIndex ~= routeIndex then
                 S.wpRoute = route
@@ -4626,11 +5532,12 @@ else
                 S.wpRoute = nil
                 local tgt = targetCoin
                 if tgt then
-                    S.stuckCount[tgt] = (S.stuckCount[tgt] or 0) + 1
-                    if S.stuckCount[tgt] >= 2 then blacklistInstance(tgt, 30) end
+                    S.stuckByTarget[tgt] = (S.stuckByTarget[tgt] or 0) + 1
+                    if S.stuckByTarget[tgt] >= 2 then blacklistInstance(tgt, 30) end
                 end
                 hum:ChangeState(Enum.HumanoidStateType.Jumping)
                 hum.Jump = true
+                if S.recordStuck then S.recordStuck("no-progress", root, "route index " .. routeIndex, nil) end
                 addLog("Not making progress, planning a new route", THEME.warn)
                 clearRoute()
                 if not isCalculatingPath then buildRouteAsync() end
@@ -4669,3 +5576,5 @@ if not ok and os.clock() - lastStepError > 5 then
     warn("[MM2Autoplay] " .. tostring(err))
 end
 end)
+
+
